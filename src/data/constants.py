@@ -9,11 +9,11 @@ class DocRetrieverConstants:
     """Constants for document retrieval operations."""
 
     # Base domain for the document source
-    DOMAIN_NAME = "https://example-court-website.com"
+    DOMAIN_NAME = "https://indiankanoon.org"
 
     # Search query template - modify this based on your actual website structure
     # {year} and {page} will be replaced with actual values
-    SEARCH_QUERY = "/search?year={year}&page={page}&doctype=supremecourt"
+    SEARCH_QUERY = "/search?formInput=year:{year} doctypes:supremecourt&pagenum={page}"
 
     # Year range for document retrieval
     START_YEAR = 2020

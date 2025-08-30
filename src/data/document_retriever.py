@@ -6,13 +6,19 @@ going through all pages until no more documents are found for each year.
 """
 
 import json
+import os
 import time
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 
+from dotenv import load_dotenv
+
 from base import WakalatLogger
 from doc_id_retriever import DocRetriever
 from constants import DocRetrieverConstants
+from bigquery_document_writer import BigQueryDocumentWriter
+
+load_dotenv()
 
 
 class ComprehensiveDocRetriever:
@@ -26,12 +32,17 @@ class ComprehensiveDocRetriever:
         self.logger = WakalatLogger("ComprehensiveDocRetriever")
         self.doc_retriever = DocRetriever()
         self.delay_between_requests = delay_between_requests
+        self.bq_doc_writer = BigQueryDocumentWriter(project_id=os.getenv('GCP.PROJECT_ID'),
+                                                    dataset_id=os.getenv('GCP.DATASET_ID'),
+                                                    table_id=os.getenv('GCP.TABLE_ID'),
+                                                    credentials_path=os.getenv('GCP.CREDENTIALS_PATH'))
 
     def retrieve_all_documents(self,
                                start_year: Optional[int] = None,
                                end_year: Optional[int] = None,
                                save_to_file: bool = True,
-                               output_filename: Optional[str] = None) -> Dict[int, List[Tuple[str, str]]]:
+                               save_to_bq: bool = True,
+                               output_filename: Optional[str] = None) -> List[Tuple[str, str, int]]:
         """
         Retrieve all documents from start year to end year across all pages.
 
@@ -42,8 +53,7 @@ class ComprehensiveDocRetriever:
             output_filename (str, optional): Output filename (auto-generated if not provided)
 
         Returns:
-            Dict[int, List[Tuple[str, str]]]: Dictionary with year as key and
-                                            list of (link, document_id) tuples as value
+            List[Tuple[str, str, int]]: List of (link, document_id, year) tuples as value
         """
         # Use default year range from constants if not provided
         if start_year is None or end_year is None:
@@ -53,15 +63,15 @@ class ComprehensiveDocRetriever:
 
         self.logger.info(f"Starting comprehensive document retrieval from {start_year} to {end_year}")
 
-        all_results = {}
+        all_results = []
         total_documents = 0
         start_time = datetime.now()
 
         # Process each year
-        for year in range(start_year, end_year + 1):
+        for year in range(end_year, start_year - 1, -1):
             self.logger.info(f"Processing year: {year}")
             year_documents = self._retrieve_documents_for_year(year)
-            all_results[year] = year_documents
+            all_results.extend(year_documents)
             total_documents += len(year_documents)
 
             self.logger.info(f"Year {year} completed: {len(year_documents)} documents found")
@@ -86,9 +96,20 @@ class ComprehensiveDocRetriever:
 
             self._save_results_to_file(all_results, output_filename, total_documents, duration)
 
+        if save_to_bq:
+            self.bq_doc_writer.insert_rows([
+                {
+                    "doc_id": result[1],
+                    "year": result[2],
+                    "metadata": {
+                        "link": result[0]
+                    }
+                } for result in all_results
+            ])
+
         return all_results
 
-    def _retrieve_documents_for_year(self, year: int) -> List[Tuple[str, str]]:
+    def _retrieve_documents_for_year(self, year: int) -> List[Tuple[str, str, int]]:
         """
         Retrieve all documents for a specific year by going through all pages.
 
@@ -96,7 +117,7 @@ class ComprehensiveDocRetriever:
             year (int): Year to process
 
         Returns:
-            List[Tuple[str, str]]: List of (link, document_id) tuples
+            List[Tuple[str, str, int]]: List of (link, document_id, year) tuples
         """
         all_documents = []
         page = 0  # Starting from page 0
@@ -148,7 +169,7 @@ class ComprehensiveDocRetriever:
         return all_documents
 
     def _save_results_to_file(self,
-                              results: Dict[int, List[Tuple[str, str]]],
+                              results: List[Tuple[str, str, int]],
                               filename: str,
                               total_documents: int,
                               duration) -> None:
@@ -156,7 +177,7 @@ class ComprehensiveDocRetriever:
         Save results to JSON file with metadata.
 
         Args:
-            results: Results dictionary
+            results: Results list
             filename: Output filename
             total_documents: Total number of documents retrieved
             duration: Time taken for retrieval
@@ -166,20 +187,18 @@ class ComprehensiveDocRetriever:
             json_data = {
                 "metadata": {
                     "total_documents": total_documents,
-                    "total_years": len(results),
                     "duration_seconds": duration.total_seconds(),
                     "duration_human": str(duration),
                     "generated_at": datetime.now().isoformat(),
-                    "years_processed": list(results.keys())
                 },
                 "data": {}
             }
 
             # Convert tuples to dictionaries for better JSON structure
-            for year, documents in results.items():
-                json_data["data"][str(year)] = [
-                    {"link": link, "document_id": doc_id}
-                    for link, doc_id in documents
+            for documents in results:
+                json_data["data"] = [
+                    {"link": link, "document_id": doc_id, "year": year}
+                    for link, doc_id, year in documents
                 ]
 
             with open(filename, 'w', encoding='utf-8') as f:
@@ -190,7 +209,7 @@ class ComprehensiveDocRetriever:
         except Exception as e:
             self.logger.error(f"Error saving results to file: {e}")
 
-    def get_summary_statistics(self, results: Dict[int, List[Tuple[str, str]]]) -> Dict:
+    def get_summary_statistics(self, results: List[Tuple[str, str, int]]) -> Dict:
         """
         Generate summary statistics from results.
 
@@ -201,22 +220,18 @@ class ComprehensiveDocRetriever:
             Dict: Summary statistics
         """
         stats = {
-            "total_years": len(results),
-            "total_documents": sum(len(docs) for docs in results.values()),
-            "documents_per_year": {year: len(docs) for year, docs in results.items()},
-            "years_with_no_documents": [year for year, docs in results.items() if len(docs) == 0],
-            "most_productive_year": None,
-            "least_productive_year": None
+            "total_documents": len(results),
         }
 
-        if results:
-            # Find most and least productive years
-            year_counts = [(year, len(docs)) for year, docs in results.items()]
-            year_counts.sort(key=lambda x: x[1], reverse=True)
-
-            if year_counts:
-                stats["most_productive_year"] = {"year": year_counts[0][0], "count": year_counts[0][1]}
-                stats["least_productive_year"] = {"year": year_counts[-1][0], "count": year_counts[-1][1]}
+        # TODO: Fix stats
+        # if results:
+        #     # Find most and least productive years
+        #     year_counts = [(year, len(docs)) for year, docs in results.items()]
+        #     year_counts.sort(key=lambda x: x[1], reverse=True)
+        #
+        #     if year_counts:
+        #         stats["most_productive_year"] = {"year": year_counts[0][0], "count": year_counts[0][1]}
+        #         stats["least_productive_year"] = {"year": year_counts[-1][0], "count": year_counts[-1][1]}
 
         return stats
 
@@ -250,14 +265,15 @@ def main():
     test_results = retriever.retrieve_all_documents(
         start_year=2024,
         end_year=2024,
-        save_to_file=True
+        save_to_file=True,
+        save_to_bq=True
     )
 
     # Display summary
-    stats = retriever.get_summary_statistics(test_results)
+    # stats = retriever.get_summary_statistics(test_results)
     retriever.logger.info("Test completed successfully!")
-    for year, count in stats['documents_per_year'].items():
-        retriever.logger.info(f"Year {year}: {count} documents")
+    # for year, count in stats['documents_per_year'].items():
+    #     retriever.logger.info(f"Year {year}: {count} documents")
 
 
 if __name__ == '__main__':

@@ -100,7 +100,7 @@ class DocRetriever:
 
         for link in links:
             doc_id = self.extract_document_id(link)
-            result.append((link, doc_id))
+            result.append((link, doc_id, year))
 
         return result
 
