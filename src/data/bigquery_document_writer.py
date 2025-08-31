@@ -3,7 +3,7 @@ from google.cloud.exceptions import NotFound
 from typing import List, Dict, Any, Optional
 import json
 from datetime import datetime, date
-from base import WakalatLogger
+from base import WakalatLogger, alert_bigquery_failure, alert_data_validation_failure
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -71,9 +71,17 @@ class BigQueryDocumentWriter:
             self.client.get_table(self.table_ref)
             self.logger.info(f"Table {self.project_id}.{self.dataset_id}.{self.table_id} found")
             return True
-        except NotFound:
-            self.logger.error(f"Table {self.project_id}.{self.dataset_id}.{self.table_id} not found")
-            raise NotFound(f"Table {self.project_id}.{self.dataset_id}.{self.table_id} does not exist")
+        except NotFound as e:
+            alert_bigquery_failure(
+                operation="table_verification",
+                error=e,
+                data_context={
+                    "project_id": self.project_id,
+                    "dataset_id": self.dataset_id,
+                    "table_id": self.table_id
+                }
+            )
+            raise
 
     def _serialize_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -115,70 +123,79 @@ class BigQueryDocumentWriter:
         Returns:
             Cleaned and validated row dictionary
         """
-        cleaned_row = {}
+        try:
+            cleaned_row = {}
 
-        # Required field validation
-        if 'doc_id' not in row or not row['doc_id']:
-            raise ValueError("doc_id is required and cannot be empty")
+            # Required field validation
+            if 'doc_id' not in row or not row['doc_id']:
+                raise ValueError("doc_id is required and cannot be empty")
 
-        cleaned_row['doc_id'] = str(row['doc_id'])
+            cleaned_row['doc_id'] = str(row['doc_id'])
 
-        # Handle optional fields
-        if 'year' in row and row['year'] is not None:
-            if isinstance(row['year'], int):
-                cleaned_row['year'] = date(year=row['year'], month=1, day=1)
+            # Handle optional fields
+            if 'year' in row and row['year'] is not None:
+                if isinstance(row['year'], int):
+                    cleaned_row['year'] = date(year=row['year'], month=1, day=1)
+                else:
+                    raise ValueError(f"year must be a date, datetime, or date string, got: {type(row['year'])}")
+
+            if 'blob_link' in row and row['blob_link'] is not None:
+                cleaned_row['blob_link'] = str(row['blob_link'])
+
+            if 'metadata' in row and row['metadata'] is not None:
+                if isinstance(row['metadata'], dict):
+                    # Serialize any datetime objects in metadata
+                    cleaned_row['metadata'] = json.dumps(self._serialize_metadata(row['metadata']))
+                elif isinstance(row['metadata'], str):
+                    try:
+                        parsed_metadata = json.loads(row['metadata'])
+                        cleaned_row['metadata'] = json.dumps(self._serialize_metadata(parsed_metadata))
+                    except json.JSONDecodeError:
+                        raise ValueError(f"metadata string is not valid JSON: {row['metadata']}")
+                else:
+                    raise ValueError(f"metadata must be a dict or JSON string, got: {type(row['metadata'])}")
+
+            if 'id' in row and row['id'] is not None:
+                cleaned_row['id'] = str(row['id'])
+
+            # Handle timestamps - auto-set if not provided
+            current_time = datetime.utcnow()
+
+            if 'created_at' in row and row['created_at'] is not None:
+                if isinstance(row['created_at'], str):
+                    try:
+                        cleaned_row['created_at'] = datetime.fromisoformat(row['created_at'].replace('Z', '+00:00'))
+                    except ValueError:
+                        raise ValueError(f"created_at must be in ISO format, got: {row['created_at']}")
+                elif isinstance(row['created_at'], datetime):
+                    cleaned_row['created_at'] = row['created_at']
+                else:
+                    raise ValueError(f"created_at must be a datetime or ISO string, got: {type(row['created_at'])}")
             else:
-                raise ValueError(f"year must be a date, datetime, or date string, got: {type(row['year'])}")
+                cleaned_row['created_at'] = current_time
 
-        if 'blob_link' in row and row['blob_link'] is not None:
-            cleaned_row['blob_link'] = str(row['blob_link'])
-
-        if 'metadata' in row and row['metadata'] is not None:
-            if isinstance(row['metadata'], dict):
-                # Serialize any datetime objects in metadata
-                cleaned_row['metadata'] = json.dumps(self._serialize_metadata(row['metadata']))
-            elif isinstance(row['metadata'], str):
-                try:
-                    parsed_metadata = json.loads(row['metadata'])
-                    cleaned_row['metadata'] = json.dumps(self._serialize_metadata(parsed_metadata))
-                except json.JSONDecodeError:
-                    raise ValueError(f"metadata string is not valid JSON: {row['metadata']}")
+            if 'updated_at' in row and row['updated_at'] is not None:
+                if isinstance(row['updated_at'], str):
+                    try:
+                        cleaned_row['updated_at'] = datetime.fromisoformat(row['updated_at'].replace('Z', '+00:00'))
+                    except ValueError:
+                        raise ValueError(f"updated_at must be in ISO format, got: {row['updated_at']}")
+                elif isinstance(row['updated_at'], datetime):
+                    cleaned_row['updated_at'] = row['updated_at']
+                else:
+                    raise ValueError(f"updated_at must be a datetime or ISO string, got: {type(row['updated_at'])}")
             else:
-                raise ValueError(f"metadata must be a dict or JSON string, got: {type(row['metadata'])}")
+                cleaned_row['updated_at'] = current_time
 
-        if 'id' in row and row['id'] is not None:
-            cleaned_row['id'] = str(row['id'])
-
-        # Handle timestamps - auto-set if not provided
-        current_time = datetime.utcnow()
-
-        if 'created_at' in row and row['created_at'] is not None:
-            if isinstance(row['created_at'], str):
-                try:
-                    cleaned_row['created_at'] = datetime.fromisoformat(row['created_at'].replace('Z', '+00:00'))
-                except ValueError:
-                    raise ValueError(f"created_at must be in ISO format, got: {row['created_at']}")
-            elif isinstance(row['created_at'], datetime):
-                cleaned_row['created_at'] = row['created_at']
-            else:
-                raise ValueError(f"created_at must be a datetime or ISO string, got: {type(row['created_at'])}")
-        else:
-            cleaned_row['created_at'] = current_time
-
-        if 'updated_at' in row and row['updated_at'] is not None:
-            if isinstance(row['updated_at'], str):
-                try:
-                    cleaned_row['updated_at'] = datetime.fromisoformat(row['updated_at'].replace('Z', '+00:00'))
-                except ValueError:
-                    raise ValueError(f"updated_at must be in ISO format, got: {row['updated_at']}")
-            elif isinstance(row['updated_at'], datetime):
-                cleaned_row['updated_at'] = row['updated_at']
-            else:
-                raise ValueError(f"updated_at must be a datetime or ISO string, got: {type(row['updated_at'])}")
-        else:
-            cleaned_row['updated_at'] = current_time
-
-        return cleaned_row
+            return cleaned_row
+        except ValueError as e:
+            # Collect validation errors for alerting
+            alert_data_validation_failure(
+                validation_errors=[str(e)],
+                data_sample=row,
+                context={"validation_step": "row_cleaning"}
+            )
+            raise
 
     def insert_row(self, row: Dict[str, Any]) -> bool:
         """
@@ -206,6 +223,13 @@ class BigQueryDocumentWriter:
 
         except Exception as e:
             self.logger.error(f"Error inserting row: {str(e)}")
+            # Alert for unexpected errors
+            if not isinstance(e, RuntimeError):
+                alert_bigquery_failure(
+                    operation="insert_row",
+                    error=e,
+                    data_context={"row_data": row}
+                )
             raise
 
     def insert_rows(self, rows: List[Dict[str, Any]], chunk_size: int = 1000) -> bool:
@@ -264,6 +288,15 @@ class BigQueryDocumentWriter:
 
         except Exception as e:
             self.logger.error(f"Error inserting rows: {str(e)}")
+            if not isinstance(e, (RuntimeError, ValueError)):
+                alert_bigquery_failure(
+                    operation="insert_rows",
+                    error=e,
+                    data_context={
+                        "total_rows": len(rows),
+                        "chunk_size": chunk_size
+                    }
+                )
             raise
 
     def upsert_row(self, row: Dict[str, Any], merge_on: str = 'doc_id') -> bool:

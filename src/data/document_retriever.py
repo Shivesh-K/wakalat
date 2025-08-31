@@ -13,7 +13,7 @@ from typing import Dict, List, Tuple, Optional
 
 from dotenv import load_dotenv
 
-from base import WakalatLogger
+from base import WakalatLogger, alert_system_error
 from doc_id_retriever import DocRetriever
 from constants import DocRetrieverConstants
 from bigquery_document_writer import BigQueryDocumentWriter
@@ -23,19 +23,29 @@ load_dotenv()
 
 class ComprehensiveDocRetriever:
     def __init__(self, delay_between_requests: float = 1.0):
-        """
-        Initialize comprehensive document retriever.
-
-        Args:
-            delay_between_requests (float): Delay in seconds between HTTP requests
-        """
+        """Initialize comprehensive document retriever with alerting."""
         self.logger = WakalatLogger("ComprehensiveDocRetriever")
         self.doc_retriever = DocRetriever()
         self.delay_between_requests = delay_between_requests
-        self.bq_doc_writer = BigQueryDocumentWriter(project_id=os.getenv('GCP.PROJECT_ID'),
-                                                    dataset_id=os.getenv('GCP.DATASET_ID'),
-                                                    table_id=os.getenv('GCP.TABLE_ID'),
-                                                    credentials_path=os.getenv('GCP.CREDENTIALS_PATH'))
+
+        try:
+            self.bq_doc_writer = BigQueryDocumentWriter(
+                project_id=os.getenv('GCP.PROJECT_ID'),
+                dataset_id=os.getenv('GCP.DATASET_ID'),
+                table_id=os.getenv('GCP.TABLE_ID'),
+                credentials_path=os.getenv('GCP.CREDENTIALS_PATH')
+            )
+        except Exception as e:
+            alert_system_error(
+                component="BigQueryDocumentWriter_initialization",
+                error=e,
+                context={
+                    "project_id": os.getenv('GCP.PROJECT_ID'),
+                    "dataset_id": os.getenv('GCP.DATASET_ID'),
+                    "table_id": os.getenv('GCP.TABLE_ID')
+                }
+            )
+            raise
 
     def retrieve_all_documents(self,
                                start_year: Optional[int] = None,
@@ -110,19 +120,13 @@ class ComprehensiveDocRetriever:
         return all_results
 
     def _retrieve_documents_for_year(self, year: int) -> List[Tuple[str, str, int]]:
-        """
-        Retrieve all documents for a specific year by going through all pages.
-
-        Args:
-            year (int): Year to process
-
-        Returns:
-            List[Tuple[str, str, int]]: List of (link, document_id, year) tuples
-        """
+        """Retrieve all documents for a specific year with enhanced error handling."""
         all_documents = []
-        page = 0  # Starting from page 0
+        page = 0
         consecutive_empty_pages = 0
-        max_consecutive_empty_pages = 3  # Stop after 3 consecutive empty pages
+        max_consecutive_empty_pages = 3
+        consecutive_errors = 0
+        max_consecutive_errors = 5
 
         self.logger.info(f"Starting page iteration for year {year}")
 
@@ -130,11 +134,12 @@ class ComprehensiveDocRetriever:
             self.logger.debug(f"Processing year {year}, page {page}")
 
             try:
-                # Get documents for current page
                 documents_with_ids = self.doc_retriever.get_document_links_with_ids(year, page)
 
                 if not documents_with_ids:
                     consecutive_empty_pages += 1
+                    consecutive_errors = 0  # Reset error count on successful (empty) response
+
                     self.logger.debug(f"No documents found for year {year}, page {page}. "
                                       f"Consecutive empty pages: {consecutive_empty_pages}")
 
@@ -143,21 +148,34 @@ class ComprehensiveDocRetriever:
                                          f"consecutive empty pages. Last page: {page}")
                         break
                 else:
-                    # Reset consecutive empty pages counter
                     consecutive_empty_pages = 0
+                    consecutive_errors = 0
                     all_documents.extend(documents_with_ids)
                     self.logger.info(f"Year {year}, Page {page}: Found {len(documents_with_ids)} documents")
 
                 page += 1
-
-                # Add delay between requests to be respectful to the server
                 time.sleep(self.delay_between_requests)
 
             except Exception as e:
+                consecutive_errors += 1
                 self.logger.error(f"Error processing year {year}, page {page}: {e}")
+
+                # Alert if we're seeing too many consecutive errors
+                if consecutive_errors >= max_consecutive_errors:
+                    alert_system_error(
+                        component="document_retrieval_loop",
+                        error=e,
+                        context={
+                            "year": year,
+                            "page": page,
+                            "consecutive_errors": consecutive_errors,
+                            "documents_found_so_far": len(all_documents)
+                        }
+                    )
+                    break
+
                 consecutive_empty_pages += 1
 
-                # If we hit too many errors, break
                 if consecutive_empty_pages >= max_consecutive_empty_pages:
                     break
 
