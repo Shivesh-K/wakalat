@@ -599,39 +599,6 @@ For urgent issues, contact the on-call engineer.
             }
         )
 
-    def health_check(self) -> Dict[str, Any]:
-        """Perform a health check of the alert system."""
-        health_status = {
-            "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
-            "issues": []
-        }
-
-        # Check credentials
-        if not self.sender_email or not self.sender_password:
-            health_status["issues"].append("Email credentials not configured")
-            health_status["status"] = "unhealthy"
-
-        # Check recipients
-        try:
-            valid_recipients = self._validate_recipients(self.recipients)
-            if len(valid_recipients) != len(self.recipients):
-                health_status["issues"].append(f"Some recipient emails are invalid")
-        except ValueError as e:
-            health_status["issues"].append(f"Recipient validation failed: {str(e)}")
-            health_status["status"] = "unhealthy"
-
-        # Test SMTP connection
-        try:
-            with self._smtp_connection() as server:
-                # If we get here, connection is successful
-                pass
-        except Exception as e:
-            health_status["issues"].append(f"SMTP connection failed: {str(e)}")
-            health_status["status"] = "unhealthy"
-
-        return health_status
-
 
 # Singleton instance for easy access
 _alert_system_instance: Optional[WakalatAlertSystem] = None

@@ -227,32 +227,6 @@ class ComprehensiveDocRetriever:
         except Exception as e:
             self.logger.error(f"Error saving results to file: {e}")
 
-    def get_summary_statistics(self, results: List[Tuple[str, str, int]]) -> Dict:
-        """
-        Generate summary statistics from results.
-
-        Args:
-            results: Results dictionary
-
-        Returns:
-            Dict: Summary statistics
-        """
-        stats = {
-            "total_documents": len(results),
-        }
-
-        # TODO: Fix stats
-        # if results:
-        #     # Find most and least productive years
-        #     year_counts = [(year, len(docs)) for year, docs in results.items()]
-        #     year_counts.sort(key=lambda x: x[1], reverse=True)
-        #
-        #     if year_counts:
-        #         stats["most_productive_year"] = {"year": year_counts[0][0], "count": year_counts[0][1]}
-        #         stats["least_productive_year"] = {"year": year_counts[-1][0], "count": year_counts[-1][1]}
-
-        return stats
-
 
 def main():
     """Main function to demonstrate comprehensive document retrieval."""
