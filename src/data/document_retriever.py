@@ -1,15 +1,15 @@
 """
-Comprehensive Document Retriever
+Comprehensive Document Retriever with Document Details Fetching
 
 This module retrieves all documents from the starting year to end year,
-going through all pages until no more documents are found for each year.
+and can fetch detailed content for specific document IDs.
 """
 
 import json
 import os
 import time
 from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 
 from dotenv import load_dotenv
 
@@ -120,6 +120,141 @@ class ComprehensiveDocRetriever:
 
         return all_results
 
+    def fetch_document_details(self, doc_id: str, save_to_bq: bool = True) -> Optional[Dict[str, Any]]:
+        """
+        Fetch detailed content for a specific document ID.
+
+        Args:
+            doc_id (str): Document ID to fetch details for
+            save_to_bq (bool): Whether to save to BigQuery
+
+        Returns:
+            Dict[str, Any]: Document details or None if failed
+        """
+        self.logger.info(f"Fetching details for document ID: {doc_id}")
+
+        try:
+            # Check if document details already exist
+            if save_to_bq and self.bq_doc_writer.check_document_exists(doc_id, "details"):
+                self.logger.info(f"Document {doc_id} details already exist in BigQuery")
+                return None
+
+            # Fetch document details
+            document_details = self.doc_retriever.fetch_document_details(doc_id)
+
+            if not document_details:
+                self.logger.warning(f"Failed to fetch details for document {doc_id}")
+                return None
+
+            # Save to BigQuery if requested
+            if save_to_bq:
+                success = self.bq_doc_writer.insert_document_details(document_details)
+                if success:
+                    self.logger.info(f"Document {doc_id} details saved to BigQuery")
+                else:
+                    self.logger.error(f"Failed to save document {doc_id} details to BigQuery")
+
+            return document_details
+
+        except Exception as e:
+            self.logger.error(f"Error fetching document details for {doc_id}: {e}")
+            alert_system_error(
+                component="fetch_document_details",
+                error=e,
+                context={
+                    "doc_id": doc_id
+                }
+            )
+            return None
+
+    def fetch_missing_document_details(self,
+                                       batch_size: int = 10,
+                                       max_documents: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Fetch details for documents that exist in links table but not in details table.
+
+        Args:
+            batch_size (int): Number of documents to process in one batch
+            max_documents (int, optional): Maximum number of documents to process
+
+        Returns:
+            Dict[str, Any]: Summary of the operation
+        """
+        self.logger.info("Starting fetch of missing document details")
+        start_time = datetime.now()
+
+        # Get documents without details
+        missing_doc_ids = self.bq_doc_writer.get_documents_without_details(
+            limit=max_documents or 1000
+        )
+
+        if not missing_doc_ids:
+            self.logger.info("No missing document details found")
+            return {
+                "total_processed": 0,
+                "successful": 0,
+                "failed": 0,
+                "duration": str(datetime.now() - start_time)
+            }
+
+        self.logger.info(f"Found {len(missing_doc_ids)} documents without details")
+
+        # Limit to max_documents if specified
+        if max_documents:
+            missing_doc_ids = missing_doc_ids[:max_documents]
+            self.logger.info(f"Limited to {len(missing_doc_ids)} documents")
+
+        successful_fetches = 0
+        failed_fetches = 0
+
+        # Process documents in batches
+        for i in range(0, len(missing_doc_ids), batch_size):
+            batch = missing_doc_ids[i:i + batch_size]
+            self.logger.info(f"Processing batch {i//batch_size + 1}: documents {i+1}-{min(i+batch_size, len(missing_doc_ids))}")
+
+            for doc_id in batch:
+                try:
+                    result = self.fetch_document_details(doc_id, save_to_bq=True)
+                    if result:
+                        successful_fetches += 1
+                        self.logger.debug(f"Successfully fetched details for {doc_id}")
+                    else:
+                        failed_fetches += 1
+                        self.logger.warning(f"Failed to fetch details for {doc_id}")
+
+                    # Delay between requests
+                    time.sleep(self.delay_between_requests)
+
+                except Exception as e:
+                    failed_fetches += 1
+                    self.logger.error(f"Exception fetching details for {doc_id}: {e}")
+
+            # Longer delay between batches
+            if i + batch_size < len(missing_doc_ids):
+                self.logger.info(f"Batch completed. Waiting {self.delay_between_requests * 2}s before next batch...")
+                time.sleep(self.delay_between_requests * 2)
+
+        end_time = datetime.now()
+        duration = end_time - start_time
+
+        summary = {
+            "total_processed": len(missing_doc_ids),
+            "successful": successful_fetches,
+            "failed": failed_fetches,
+            "success_rate": (successful_fetches / len(missing_doc_ids)) * 100 if missing_doc_ids else 0,
+            "duration": str(duration),
+            "duration_seconds": duration.total_seconds()
+        }
+
+        self.logger.info("Missing document details fetch completed!")
+        self.logger.info(f"Total processed: {summary['total_processed']}")
+        self.logger.info(f"Successful: {summary['successful']}")
+        self.logger.info(f"Failed: {summary['failed']}")
+        self.logger.info(f"Success rate: {summary['success_rate']:.2f}%")
+        self.logger.info(f"Duration: {summary['duration']}")
+
+        return summary
+
     def _retrieve_documents_for_year(self, year: int) -> List[Tuple[str, str, int]]:
         """Retrieve all documents for a specific year with enhanced error handling."""
         all_documents = []
@@ -210,15 +345,11 @@ class ComprehensiveDocRetriever:
                     "duration_human": str(duration),
                     "generated_at": datetime.now().isoformat(),
                 },
-                "data": {}
-            }
-
-            # Convert tuples to dictionaries for better JSON structure
-            for documents in results:
-                json_data["data"] = [
+                "data": [
                     {"link": link, "document_id": doc_id, "year": year}
-                    for link, doc_id, year in documents
+                    for link, doc_id, year in results
                 ]
+            }
 
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(json_data, f, indent=2, ensure_ascii=False)
@@ -228,45 +359,95 @@ class ComprehensiveDocRetriever:
         except Exception as e:
             self.logger.error(f"Error saving results to file: {e}")
 
+    def get_system_status(self) -> Dict[str, Any]:
+        """
+        Get comprehensive system status including table statistics.
+
+        Returns:
+            Dict[str, Any]: System status information
+        """
+        try:
+            stats = self.bq_doc_writer.get_table_stats()
+
+            status = {
+                "timestamp": datetime.now().isoformat(),
+                "bigquery_stats": stats,
+                "configuration": {
+                    "project_id": os.getenv('GCP.PROJECT_ID'),
+                    "dataset_id": os.getenv('GCP.DATASET_ID'),
+                    "table_id": os.getenv('GCP.TABLE_ID'),
+                    "delay_between_requests": self.delay_between_requests,
+                    "year_range": f"{DocRetrieverConstants.START_YEAR}-{DocRetrieverConstants.END_YEAR}"
+                }
+            }
+
+            return status
+
+        except Exception as e:
+            self.logger.error(f"Error getting system status: {e}")
+            return {
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+
 
 def main():
-    """Main function to demonstrate comprehensive document retrieval."""
+    """Main function to demonstrate comprehensive document retrieval with details fetching."""
     # Initialize the comprehensive retriever
     retriever = ComprehensiveDocRetriever(delay_between_requests=0.5)
 
-    # Example: Retrieve documents for a specific year range
-    # Uncomment and modify as needed
+    # Example workflows:
+
+    # 1. Retrieve document links (existing functionality)
+    print("=== Option 1: Retrieve Document Links ===")
     """
     results = retriever.retrieve_all_documents(
         start_year=2023,
         end_year=2024,
-        save_to_file=True
-    )
-
-    # Get and display summary statistics
-    stats = retriever.get_summary_statistics(results)
-    retriever.logger.info("Summary Statistics:")
-    retriever.logger.info(f"Total years processed: {stats['total_years']}")
-    retriever.logger.info(f"Total documents: {stats['total_documents']}")
-    if stats['most_productive_year']:
-        retriever.logger.info(f"Most productive year: {stats['most_productive_year']['year']} "
-                            f"({stats['most_productive_year']['count']} documents)")
-    """
-
-    # For testing, just retrieve a small sample
-    retriever.logger.info("Starting test retrieval for 2024 (limited)")
-    test_results = retriever.retrieve_all_documents(
-        start_year=2015,
-        end_year=2023,
-        save_to_file=False,
+        save_to_file=True,
         save_to_bq=True
     )
+    """
 
-    # Display summary
-    # stats = retriever.get_summary_statistics(test_results)
-    retriever.logger.info("Test completed successfully!")
-    # for year, count in stats['documents_per_year'].items():
-    #     retriever.logger.info(f"Year {year}: {count} documents")
+    # 2. Fetch details for a specific document
+    print("=== Option 2: Fetch Specific Document Details ===")
+    """
+    doc_id = "12345678"  # Replace with actual document ID
+    details = retriever.fetch_document_details(doc_id, save_to_bq=True)
+    if details:
+        print(f"Successfully fetched details for document {doc_id}")
+        print(f"Title: {details.get('title', 'N/A')}")
+        print(f"Content length: {len(details.get('content', ''))}")
+    """
+
+    # 3. Fetch details for all missing documents
+    print("=== Option 3: Fetch Missing Document Details ===")
+    """
+    summary = retriever.fetch_missing_document_details(
+        batch_size=5,      # Process 5 documents at a time
+        max_documents=50   # Limit to 50 documents for testing
+    )
+    print("Fetch Summary:")
+    print(f"Total processed: {summary['total_processed']}")
+    print(f"Successful: {summary['successful']}")
+    print(f"Failed: {summary['failed']}")
+    print(f"Success rate: {summary['success_rate']:.2f}%")
+    """
+
+    # 4. Get system status
+    print("=== System Status ===")
+    status = retriever.get_system_status()
+    print("BigQuery Statistics:")
+    if "bigquery_stats" in status:
+        stats = status["bigquery_stats"]
+        if "links" in stats:
+            print(f"  Links table: {stats['links'].get('total_links', 0)} documents")
+            print(f"  Years covered: {stats['links'].get('years_covered', 0)}")
+        if "details" in stats:
+            print(f"  Details table: {stats['details'].get('total_details', 0)} documents")
+            print(f"  Avg content length: {stats['details'].get('avg_content_length', 0):.0f} chars")
+        if "completion_percentage" in stats:
+            print(f"  Completion rate: {stats['completion_percentage']}%")
 
 
 if __name__ == '__main__':
