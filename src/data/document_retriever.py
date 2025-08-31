@@ -14,9 +14,9 @@ from typing import List, Tuple, Optional
 from dotenv import load_dotenv
 
 from base import WakalatLogger, alert_system_error
-from doc_id_retriever import DocRetriever
-from constants import DocRetrieverConstants
-from bigquery_document_writer import BigQueryDocumentWriter
+from .doc_id_retriever import DocRetriever
+from .constants import DocRetrieverConstants
+from .bigquery_document_writer import BigQueryDocumentWriter
 
 load_dotenv()
 
@@ -60,6 +60,7 @@ class ComprehensiveDocRetriever:
             start_year (int, optional): Starting year (uses constant if not provided)
             end_year (int, optional): Ending year (uses constant if not provided)
             save_to_file (bool): Whether to save results to JSON file
+            save_to_bq (bool): Whether to save results to BigQuery
             output_filename (str, optional): Output filename (auto-generated if not provided)
 
         Returns:
@@ -255,9 +256,9 @@ def main():
     # For testing, just retrieve a small sample
     retriever.logger.info("Starting test retrieval for 2024 (limited)")
     test_results = retriever.retrieve_all_documents(
-        start_year=2024,
-        end_year=2024,
-        save_to_file=True,
+        start_year=2015,
+        end_year=2023,
+        save_to_file=False,
         save_to_bq=True
     )
 
