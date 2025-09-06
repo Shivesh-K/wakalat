@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import datetime
+from datetime import datetime, date
 from typing import List, Dict, Any, Optional
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
@@ -108,6 +108,12 @@ class BigQueryDocumentWriter:
             for row in rows:
                 if "created_at" not in row:
                     row["created_at"] = current_time.isoformat(sep=' ')
+                if 'year' in row and isinstance(row['year'], int):
+                    year = row['year']
+                    row['year'] = date(year, 1, 1).isoformat()
+                if 'metadata' in row and not isinstance(row['metadata'], str):
+                    metadata = row['metadata']
+                    row['metadata'] = json.dumps(metadata)
 
             # Insert rows
             errors = self.client.insert_rows_json(table, rows)

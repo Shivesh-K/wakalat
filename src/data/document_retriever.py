@@ -185,7 +185,7 @@ class ComprehensiveDocRetriever:
 
         # Get documents without details
         missing_doc_ids = self.bq_doc_writer.get_documents_without_details(
-            limit=max_documents or 1000
+            limit=max_documents or 10000
         )
 
         if not missing_doc_ids:

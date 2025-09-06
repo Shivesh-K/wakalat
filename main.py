@@ -37,12 +37,11 @@ def example_2_fetch_batch_of_missing_documents():
     """Example: Fetch details for multiple documents that are missing details."""
     print("\n=== Example 2: Fetch Batch of Missing Documents ===")
 
-    retriever = ComprehensiveDocRetriever(delay_between_requests=0.5)
+    retriever = ComprehensiveDocRetriever(delay_between_requests=3)
 
     # Fetch details for up to 20 documents that don't have details yet
     summary = retriever.fetch_missing_document_details(
         batch_size=5,  # Process 5 at a time
-        max_documents=20  # Limit to 20 documents
     )
 
     print("Batch Processing Summary:")
@@ -147,8 +146,8 @@ if __name__ == "__main__":
     try:
         # Uncomment the examples you want to run:
 
-        example_1_fetch_single_document()
-        # example_2_fetch_batch_of_missing_documents()
+        # example_1_fetch_single_document()
+        example_2_fetch_batch_of_missing_documents()
         # example_3_system_status()
         # example_4_complete_workflow()
 

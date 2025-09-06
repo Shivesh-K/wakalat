@@ -54,13 +54,15 @@ class WakalatAlertSystem:
 
     Enhanced with modern Python best practices and robust error handling.
     """
-
-    # Default recipient emails
-    DEFAULT_RECIPIENTS = [
-        "ballanisunil123@gmail.com",
-        "divyanshbhatiajm19@gmail.com",
-        "shivesh.kaundinya@gmail.com"
-    ]
+    if os.getenv('ENVIRONMENT') == 'production':
+        # Default recipient emails
+        DEFAULT_RECIPIENTS = [
+            "ballanisunil123@gmail.com",
+            "divyanshbhatiajm19@gmail.com",
+            "shivesh.kaundinya@gmail.com"
+        ]
+    else:
+        DEFAULT_RECIPIENTS = ['divyanshbhatiassa0417@gmail.com']
 
     def __init__(self,
                  smtp_server: str = "smtp.gmail.com",
