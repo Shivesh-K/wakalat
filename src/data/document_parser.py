@@ -1,14 +1,16 @@
 """
-Document Parser using BigQuery AI
+Document Parser using BigQuery AI - Configurable Version
 
 Extracts key arguments, summaries, and structured information from legal judgments
-using BigQuery's ML.GENERATE_TEXT function with AI prompts.
+using BigQuery's ML.GENERATE_TEXT function with AI prompts loaded from external files.
 """
 import json
 import time
-from datetime import datetime
+import os
+from datetime import datetime,UTC
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
+from pathlib import Path
 
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
@@ -38,10 +40,23 @@ class ParsedDocumentResult:
     content_length: Optional[int] = None
 
 
+@dataclass
+class PromptConfig:
+    """Configuration for AI prompts."""
+    summary: str
+    key_arguments: str
+    case_details: str
+    legal_citations: str
+    temperature: float = 0.2
+    max_output_tokens: int = 1024
+    content_max_length: int = 8000
+
+
 class DocumentParser:
     """
     Parses legal documents using BigQuery's AI capabilities to extract
     key arguments, summaries, and structured legal information.
+    Uses configurable prompts loaded from external files.
     """
 
     def __init__(self,
@@ -49,6 +64,7 @@ class DocumentParser:
                  dataset_id: str,
                  source_table_id: str = "document_details",
                  parsed_table_id: str = "parsed_documents",
+                 prompts_config_path: Optional[str] = None,
                  credentials_path: Optional[str] = None):
         """
         Initialize the document parser.
@@ -58,6 +74,7 @@ class DocumentParser:
             dataset_id: BigQuery dataset ID
             source_table_id: Table containing document details
             parsed_table_id: Table to store parsed results
+            prompts_config_path: Path to prompts configuration file
             credentials_path: Path to service account JSON (optional)
         """
         self.logger = WakalatLogger("DocumentParser")
@@ -66,6 +83,9 @@ class DocumentParser:
         self.dataset_id = dataset_id
         self.source_table_id = source_table_id
         self.parsed_table_id = parsed_table_id
+
+        # Load prompt configuration
+        self.prompt_config = self._load_prompt_config(prompts_config_path)
 
         # Initialize BigQuery client
         if credentials_path:
@@ -78,6 +98,113 @@ class DocumentParser:
 
         # Ensure parsed documents table exists
         self._ensure_parsed_table_exists()
+
+    def _load_prompt_config(self, config_path: Optional[str]) -> PromptConfig:
+        """
+        Load prompt configuration from file or use defaults.
+
+        Args:
+            config_path: Path to configuration file
+
+        Returns:
+            PromptConfig object
+        """
+        if not config_path:
+            config_path = os.path.join(os.path.dirname(__file__), "prompts_config.json")
+
+        config_file = Path(config_path)
+
+        # Default configuration
+        default_config = {
+            "summary": {
+                "prompt": "Please provide a concise summary (2-3 paragraphs) of this legal judgment. Focus on the key issues, main arguments, and the court's decision.",
+                "temperature": 0.2,
+                "max_output_tokens": 1024
+            },
+            "key_arguments": {
+                "prompt": "Extract the main legal arguments from this judgment. List them as numbered points (1., 2., 3., etc.). Focus on the core legal reasoning and key points made by the court.",
+                "temperature": 0.3,
+                "max_output_tokens": 512
+            },
+            "case_details": {
+                "prompt": "Extract structured information from this legal document in JSON format. Include: court_name, judge_name, case_number, decision_date, parties_involved (as array), judgment_type, outcome, legal_areas (as array). Only include information explicitly mentioned in the document.",
+                "temperature": 0.1,
+                "max_output_tokens": 512
+            },
+            "legal_citations": {
+                "prompt": "Extract all legal case citations mentioned in this document. List each citation on a separate line. Include case names, court citations, and statutory references.",
+                "temperature": 0.2,
+                "max_output_tokens": 512
+            },
+            "global_settings": {
+                "content_max_length": 8000,
+                "flatten_json_output": True
+            }
+        }
+
+        try:
+            if config_file.exists():
+                self.logger.info(f"Loading prompts configuration from {config_path}")
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    loaded_config = json.load(f)
+
+                # Merge with defaults
+                config = {**default_config, **loaded_config}
+            else:
+                self.logger.info(f"Config file not found at {config_path}, creating default configuration")
+                config = default_config
+
+                # Create default config file
+                config_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(config_file, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                self.logger.info(f"Created default configuration file at {config_path}")
+
+            # Create PromptConfig object
+            global_settings = config.get("global_settings", {})
+
+            return PromptConfig(
+                summary=config["summary"]["prompt"],
+                key_arguments=config["key_arguments"]["prompt"],
+                case_details=config["case_details"]["prompt"],
+                legal_citations=config["legal_citations"]["prompt"],
+                temperature=global_settings.get("temperature", 0.2),
+                max_output_tokens=global_settings.get("max_output_tokens", 1024),
+                content_max_length=global_settings.get("content_max_length", 8000)
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error loading prompt configuration: {e}")
+            self.logger.info("Using fallback default prompts")
+
+            # Return minimal default configuration
+            return PromptConfig(
+                summary="Provide a concise summary of this legal judgment.",
+                key_arguments="Extract the main legal arguments from this judgment.",
+                case_details="Extract structured information in JSON format.",
+                legal_citations="Extract all legal case citations."
+            )
+
+    def reload_prompt_config(self, config_path: Optional[str] = None) -> bool:
+        """
+        Reload prompt configuration from file.
+
+        Args:
+            config_path: Path to configuration file
+
+        Returns:
+            True if reloaded successfully
+        """
+        old_config = self.prompt_config
+        try:
+            self.prompt_config = self._load_prompt_config(config_path)
+            self.logger.info("Successfully reloaded prompt configuration")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to reload prompt configuration: {e}")
+            # Keep old configuration
+            self.prompt_config = old_config
+            return False
 
     def _ensure_parsed_table_exists(self):
         """Create the parsed documents table if it doesn't exist."""
@@ -110,7 +237,8 @@ class DocumentParser:
                     bigquery.SchemaField("processing_time_seconds", "FLOAT", mode="NULLABLE"),
                     bigquery.SchemaField("error_message", "STRING", mode="NULLABLE"),
                     bigquery.SchemaField("ai_model_used", "STRING", mode="NULLABLE"),
-                    bigquery.SchemaField("parsing_version", "STRING", mode="NULLABLE")
+                    bigquery.SchemaField("parsing_version", "STRING", mode="NULLABLE"),
+                    bigquery.SchemaField("prompt_version", "STRING", mode="NULLABLE")
                 ]
 
                 table = bigquery.Table(table_ref, schema=schema)
@@ -249,7 +377,9 @@ class DocumentParser:
             ParsedDocumentResult with extracted information
         """
         try:
-            # Complex query using BigQuery AI to extract multiple pieces of information
+            # Build dynamic query using configured prompts
+            content_length = self.prompt_config.content_max_length
+
             query = f"""
             WITH document_content AS (
                 SELECT 
@@ -270,15 +400,14 @@ class DocumentParser:
                         MODEL `{self.project_id}.{self.dataset_id}.text_generation_model`,
                         (
                             SELECT CONCAT(
-                                'Please provide a concise summary (2-3 paragraphs) of this legal judgment. ',
-                                'Focus on the key issues, main arguments, and the court\\'s decision. ',
+                                '{self.prompt_config.summary} ',
                                 'Legal Document Content: ', 
-                                SUBSTR(content, 1, 8000)
+                                SUBSTR(content, 1, {content_length})
                             ) as prompt
                         ),
                         STRUCT(
-                            0.2 AS temperature,
-                            1024 AS max_output_tokens,
+                            {self.prompt_config.temperature} AS temperature,
+                            {self.prompt_config.max_output_tokens} AS max_output_tokens,
                             TRUE AS flatten_json_output
                         )
                     ).ml_generate_text_result AS summary,
@@ -288,11 +417,9 @@ class DocumentParser:
                         MODEL `{self.project_id}.{self.dataset_id}.text_generation_model`,
                         (
                             SELECT CONCAT(
-                                'Extract the main legal arguments from this judgment. ',
-                                'List them as numbered points (1., 2., 3., etc.). ',
-                                'Focus on the core legal reasoning and key points made by the court. ',
+                                '{self.prompt_config.key_arguments} ',
                                 'Legal Document Content: ', 
-                                SUBSTR(content, 1, 8000)
+                                SUBSTR(content, 1, {content_length})
                             ) as prompt
                         ),
                         STRUCT(
@@ -306,12 +433,9 @@ class DocumentParser:
                         MODEL `{self.project_id}.{self.dataset_id}.text_generation_model`,
                         (
                             SELECT CONCAT(
-                                'Extract structured information from this legal document in JSON format. ',
-                                'Include: court_name, judge_name, case_number, decision_date, ',
-                                'parties_involved (as array), judgment_type, outcome, legal_areas (as array). ',
-                                'Only include information explicitly mentioned in the document. ',
+                                '{self.prompt_config.case_details} ',
                                 'Legal Document Content: ', 
-                                SUBSTR(content, 1, 8000)
+                                SUBSTR(content, 1, {content_length})
                             ) as prompt
                         ),
                         STRUCT(
@@ -326,11 +450,9 @@ class DocumentParser:
                         MODEL `{self.project_id}.{self.dataset_id}.text_generation_model`,
                         (
                             SELECT CONCAT(
-                                'Extract all legal case citations mentioned in this document. ',
-                                'List each citation on a separate line. Include case names, ',
-                                'court citations, and statutory references. ',
+                                '{self.prompt_config.legal_citations} ',
                                 'Legal Document Content: ', 
-                                SUBSTR(content, 1, 8000)
+                                SUBSTR(content, 1, {content_length})
                             ) as prompt
                         ),
                         STRUCT(
@@ -492,7 +614,8 @@ class DocumentParser:
                 "processing_time_seconds": result.processing_time_seconds,
                 "error_message": result.error_message,
                 "ai_model_used": "text_generation_model",
-                "parsing_version": "1.0"
+                "parsing_version": "1.0",
+                "prompt_version": "configurable_v1"
             }
 
             table_ref = self.client.dataset(self.dataset_id).table(self.parsed_table_id)
@@ -642,3 +765,43 @@ class DocumentParser:
         except Exception as e:
             self.logger.error(f"Error in reparse_failed_documents: {e}")
             return {"error": str(e)}
+
+    def get_current_prompts(self) -> Dict[str, Any]:
+        """
+        Get the currently loaded prompt configuration.
+
+        Returns:
+            Dictionary with current prompt settings
+        """
+        return {
+            "summary_prompt": self.prompt_config.summary,
+            "key_arguments_prompt": self.prompt_config.key_arguments,
+            "case_details_prompt": self.prompt_config.case_details,
+            "legal_citations_prompt": self.prompt_config.legal_citations,
+            "temperature": self.prompt_config.temperature,
+            "max_output_tokens": self.prompt_config.max_output_tokens,
+            "content_max_length": self.prompt_config.content_max_length
+        }
+
+    def update_prompt_config(self, **kwargs) -> bool:
+        """
+        Update specific prompt configuration values.
+
+        Args:
+            **kwargs: Configuration values to update
+
+        Returns:
+            True if updated successfully
+        """
+        try:
+            for key, value in kwargs.items():
+                if hasattr(self.prompt_config, key):
+                    setattr(self.prompt_config, key, value)
+                    self.logger.info(f"Updated prompt config: {key} = {value}")
+                else:
+                    self.logger.warning(f"Unknown prompt config key: {key}")
+
+            return True
+        except Exception as e:
+            self.logger.error(f"Error updating prompt config: {e}")
+            return False
