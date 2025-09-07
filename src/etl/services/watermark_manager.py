@@ -5,8 +5,8 @@ Manages watermarks to track the last processed state for each year,
 enabling efficient incremental data loading.
 """
 
-from typing import Dict, List, Optional
-from datetime import datetime
+from typing import Dict, Optional
+from datetime import datetime, UTC
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
 
@@ -279,7 +279,7 @@ class WatermarkManager:
                 year=year,
                 last_processed_page=0,
                 last_document_id=None,
-                last_updated=datetime.utcnow(),
+                last_updated=datetime.now(UTC),
                 total_documents=0,
                 is_complete=False
             )
@@ -308,7 +308,7 @@ class WatermarkManager:
             existing_watermark = self.get_watermark(year)
             if existing_watermark:
                 existing_watermark.is_complete = True
-                existing_watermark.last_updated = datetime.utcnow()
+                existing_watermark.last_updated = datetime.now(UTC)
                 return self.update_watermark(existing_watermark)
             else:
                 self.logger.warning(f"Cannot mark year {year} complete - no watermark found")

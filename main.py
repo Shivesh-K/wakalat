@@ -5,7 +5,7 @@ This script demonstrates how to use the enhanced document retrieval system
 to fetch document details and store them in BigQuery.
 """
 
-from src.data.document_retriever import ComprehensiveDocRetriever
+from src.data import ComprehensiveDocRetriever
 import os
 from dotenv import load_dotenv
 

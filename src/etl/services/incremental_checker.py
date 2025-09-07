@@ -6,7 +6,7 @@ to identify which documents need to be added.
 """
 
 from typing import List, Dict, Set, Tuple, Optional, Any
-from datetime import datetime, date
+from datetime import datetime, date, UTC
 from google.cloud import bigquery
 
 from base import WakalatLogger, alert_bigquery_failure, alert_data_validation_failure, alert_system_error
@@ -156,7 +156,7 @@ class IncrementalDocumentChecker:
                                 "metadata": {
                                     "page": page,
                                     "original_link": link,
-                                    "retrieved_at": datetime.utcnow().isoformat()
+                                    "retrieved_at": datetime.now(UTC).isoformat()
                                 }
                             })
                             # Add to existing_ids to avoid duplicates within this run
@@ -324,7 +324,7 @@ class IncrementalDocumentChecker:
                         year=year,
                         last_processed_page=start_page + pages_processed - 1,
                         last_document_id=None,  # Could enhance to track last doc ID
-                        last_updated=datetime.utcnow(),
+                        last_updated=datetime.now(UTC),
                         total_documents=(watermark.total_documents if watermark else 0) +
                                         sum(len(batch) for batch in valid_batches),
                         is_complete=(pages_processed < max_pages_per_year) if max_pages_per_year else False
@@ -374,5 +374,5 @@ class IncrementalDocumentChecker:
             "years_processed": len(results),
             "years_with_updates": years_with_updates,
             "year_summaries": year_summaries,
-            "processed_at": datetime.utcnow().isoformat()
+            "processed_at": datetime.now(UTC).isoformat()
         }

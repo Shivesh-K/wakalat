@@ -5,10 +5,8 @@ This package provides a comprehensive ETL solution for incrementally
 retrieving and loading document data into BigQuery using GCP services.
 """
 
-from .services.etl_orchestrator import ETLOrchestrator
-from .services.incremental_checker import IncrementalDocumentChecker
-from .services.watermark_manager import WatermarkManager
-from .models.etl_models import (
+from .services import ETLOrchestrator, IncrementalDocumentChecker, WatermarkManager
+from .models import (
     ETLJobStatus,
     ETLRunMetrics,
     DocumentBatch,

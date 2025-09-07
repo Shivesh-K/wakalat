@@ -6,7 +6,7 @@ and document batches throughout the pipeline.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import List, Dict, Any, Optional
 from enum import Enum
 
@@ -84,6 +84,7 @@ class ETLRunMetrics:
     total_documents_found: int = 0
     total_documents_added: int = 0
     total_documents_skipped: int = 0
+    total_parsing_failures: int = 0
     errors: List[str] = field(default_factory=list)
     processing_details: Dict[int, Dict] = field(default_factory=dict)
 
@@ -105,7 +106,7 @@ class ETLRunMetrics:
             "documents_found": found,
             "documents_added": added,
             "documents_skipped": skipped,
-            "processed_at": datetime.utcnow().isoformat()
+            "processed_at": datetime.now(UTC).isoformat()
         }
         self.total_documents_found += found
         self.total_documents_added += added
@@ -116,14 +117,14 @@ class ETLRunMetrics:
 
     def add_error(self, error: str):
         """Add an error to the run."""
-        self.errors.append(f"{datetime.utcnow().isoformat()}: {error}")
+        self.errors.append(f"{datetime.now(UTC).isoformat()}: {error}")
         if self.status == ETLJobStatus.RUNNING:
             self.status = ETLJobStatus.PARTIAL_SUCCESS
 
     def complete_job(self, status: ETLJobStatus):
         """Mark the job as complete with final status."""
         self.status = status
-        self.end_time = datetime.utcnow()
+        self.end_time = datetime.now(UTC)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for BigQuery storage."""

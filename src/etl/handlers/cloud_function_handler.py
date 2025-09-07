@@ -88,7 +88,8 @@ def main(event: Dict[str, Any], context) -> Dict[str, Any]:
 
         metrics = orchestrator.run_incremental_etl(
             years=years,
-            max_documents_per_run=config.get('max_documents_per_run')
+            max_documents_per_run=config.get('max_documents_per_run'),
+            skip_parsing=True
         )
 
         # Prepare response
@@ -286,7 +287,7 @@ def get_etl_status() -> Dict[str, Any]:
             "success": True,
             "recent_jobs": recent_jobs,
             "watermark_states": watermark_summary,
-            "checked_at": datetime.utcnow().isoformat()
+            "checked_at": datetime.now(UTC).isoformat()
         }
 
     except Exception as e:
@@ -300,7 +301,7 @@ def get_etl_status() -> Dict[str, Any]:
 # For local testing
 if __name__ == "__main__":
     import sys
-    from datetime import datetime
+    from datetime import datetime, UTC
 
     if len(sys.argv) > 1 and sys.argv[1] == "test":
         print("Running ETL function test...")

@@ -2,19 +2,18 @@
 ETL Orchestrator
 
 Coordinates the entire ETL process including incremental document checking,
-watermark management, and BigQuery loading.
+watermark management, BigQuery loading, and document parsing.
 """
 import json
 import uuid
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, UTC
 
 from base import WakalatLogger, alert_system_error
-from src.data import BigQueryDocumentWriter, DocRetrieverConstants
-from ..models.etl_models import ETLRunMetrics, ETLJobStatus, DocumentBatch
-from ..services.watermark_manager import WatermarkManager
-from ..services.incremental_checker import IncrementalDocumentChecker
-from ...data.document_retriever import ComprehensiveDocRetriever
+from src.data import BigQueryDocumentWriter, ComprehensiveDocRetriever, DocRetrieverConstants, DocumentParser
+from src.etl.models import ETLRunMetrics, ETLJobStatus, DocumentBatch
+from .watermark_manager import WatermarkManager
+from .incremental_checker import IncrementalDocumentChecker
 
 
 class ETLOrchestrator:
@@ -22,7 +21,7 @@ class ETLOrchestrator:
     Orchestrates the complete ETL pipeline process.
 
     Manages the workflow of checking for new documents, validating data,
-    updating watermarks, and loading data into BigQuery.
+    updating watermarks, loading data into BigQuery, and parsing document content.
     """
 
     def __init__(self,
@@ -72,6 +71,13 @@ class ETLOrchestrator:
 
         self.doc_retriever = ComprehensiveDocRetriever()
 
+        # Initialize document parser
+        self.document_parser = DocumentParser(
+            project_id=project_id,
+            dataset_id=dataset_id,
+            credentials_path=credentials_path
+        )
+
         # Create ETL job metrics table if needed
         self._ensure_metrics_table_exists()
 
@@ -99,6 +105,8 @@ class ETLOrchestrator:
                     bigquery.SchemaField("total_documents_found", "INTEGER", mode="REQUIRED"),
                     bigquery.SchemaField("total_documents_added", "INTEGER", mode="REQUIRED"),
                     bigquery.SchemaField("total_documents_skipped", "INTEGER", mode="REQUIRED"),
+                    bigquery.SchemaField("total_documents_parsed", "INTEGER", mode="REQUIRED"),
+                    bigquery.SchemaField("total_parsing_failures", "INTEGER", mode="REQUIRED"),
                     bigquery.SchemaField("errors", "STRING", mode="REPEATED"),
                     bigquery.SchemaField("processing_details", "JSON", mode="NULLABLE"),
                     bigquery.SchemaField("duration_seconds", "FLOAT", mode="NULLABLE")
@@ -122,24 +130,30 @@ class ETLOrchestrator:
 
     def run_incremental_etl(self,
                             years: Optional[List[int]] = None,
-                            max_documents_per_run: Optional[int] = None) -> ETLRunMetrics:
+                            max_documents_per_run: Optional[int] = None,
+                            skip_parsing: bool = False) -> ETLRunMetrics:
         """
-        Run the complete incremental ETL pipeline.
+        Run the complete incremental ETL pipeline with document parsing.
 
         Args:
             years: List of years to process (default: uses constants)
             max_documents_per_run: Maximum documents to process in this run
+            skip_parsing: Whether to skip the parsing phase
 
         Returns:
             ETLRunMetrics with job results
         """
-        job_id = f"etl_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        job_id = f"etl_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
         metrics = ETLRunMetrics(
             job_id=job_id,
-            start_time=datetime.utcnow(),
+            start_time=datetime.now(UTC),
             status=ETLJobStatus.RUNNING
         )
+
+        # Add parsing metrics to the metrics object
+        metrics.total_documents_parsed = 0
+        metrics.total_parsing_failures = 0
 
         try:
             self.logger.info(f"Starting ETL job {job_id}")
@@ -175,8 +189,10 @@ class ETLOrchestrator:
                 self._save_metrics(metrics)
                 return metrics
 
-            # Phase 2: Load new documents into BigQuery
+            # Phase 2: Load new documents into BigQuery and fetch details
             self.logger.info(f"Phase 2: Loading {total_documents_to_process} new documents into BigQuery")
+
+            processed_document_ids = []  # Track successfully processed documents for parsing
 
             for year, batches in incremental_results.items():
                 if not batches:
@@ -198,12 +214,30 @@ class ETLOrchestrator:
                         # Insert documents into BigQuery
                         success = self.bigquery_writer.insert_rows(all_year_documents)
 
-                        for doc in all_year_documents:
-                            self.bigquery_writer.insert_document_details(self.doc_retriever.fetch_document_details(doc['doc_id']))
-
                         if success:
+                            # Fetch document details for each document
+                            year_processed_doc_ids = []
+                            for doc in all_year_documents:
+                                doc_id = doc['doc_id']
+                                try:
+                                    details = self.doc_retriever.fetch_document_details(doc_id)
+                                    if details:
+                                        detail_success = self.bigquery_writer.insert_document_details(details)
+                                        if detail_success:
+                                            year_processed_doc_ids.append(doc_id)
+                                            self.logger.debug(f"Successfully fetched and saved details for {doc_id}")
+                                        else:
+                                            self.logger.warning(f"Failed to save details for {doc_id}")
+                                    else:
+                                        self.logger.warning(f"Failed to fetch details for {doc_id}")
+                                except Exception as e:
+                                    self.logger.error(f"Error processing details for {doc_id}: {e}")
+
                             documents_added = len(all_year_documents)
+                            processed_document_ids.extend(year_processed_doc_ids)
                             self.logger.info(f"Successfully loaded {documents_added} documents for year {year}")
+                            self.logger.info(
+                                f"Successfully fetched details for {len(year_processed_doc_ids)} documents")
                         else:
                             documents_skipped = len(all_year_documents)
                             metrics.add_error(f"Failed to load documents for year {year}")
@@ -230,9 +264,33 @@ class ETLOrchestrator:
                         skipped=documents_found
                     )
 
+            # Phase 3: Parse document content
+            if not skip_parsing and processed_document_ids:
+                self.logger.info(f"Phase 3: Parsing {len(processed_document_ids)} document contents")
+
+                parsing_results = self._parse_documents(processed_document_ids)
+                metrics.total_documents_parsed = parsing_results['successful']
+                metrics.total_parsing_failures = parsing_results['failed']
+
+                self.logger.info(f"Parsing completed: {parsing_results['successful']} successful, "
+                                 f"{parsing_results['failed']} failed")
+
+                # Add parsing errors to metrics
+                if parsing_results['errors']:
+                    for error in parsing_results['errors']:
+                        metrics.add_error(f"Parsing error: {error}")
+
+            elif skip_parsing:
+                self.logger.info("Phase 3: Skipping document parsing as requested")
+            else:
+                self.logger.info("Phase 3: No documents to parse")
+
             # Determine final job status
             if metrics.total_documents_added == total_documents_to_process:
-                final_status = ETLJobStatus.SUCCESS
+                if not skip_parsing and metrics.total_parsing_failures > 0:
+                    final_status = ETLJobStatus.PARTIAL_SUCCESS
+                else:
+                    final_status = ETLJobStatus.SUCCESS
             elif metrics.total_documents_added > 0:
                 final_status = ETLJobStatus.PARTIAL_SUCCESS
             else:
@@ -244,6 +302,10 @@ class ETLOrchestrator:
             self.logger.info(f"Documents: {metrics.total_documents_found} found, "
                              f"{metrics.total_documents_added} added, "
                              f"{metrics.total_documents_skipped} skipped")
+
+            if not skip_parsing:
+                self.logger.info(f"Parsing: {metrics.total_documents_parsed} successful, "
+                                 f"{metrics.total_parsing_failures} failed")
 
             # Save metrics
             self._save_metrics(metrics)
@@ -273,6 +335,63 @@ class ETLOrchestrator:
                 self.logger.error(f"Could not save metrics for failed job: {save_error}")
 
             return metrics
+
+    def _parse_documents(self, document_ids: List[str]) -> Dict[str, Any]:
+        """
+        Parse document contents for the given document IDs.
+
+        Args:
+            document_ids: List of document IDs to parse
+
+        Returns:
+            Dict with parsing results summary
+        """
+        parsing_results = {
+            'successful': 0,
+            'failed': 0,
+            'errors': []
+        }
+
+        self.logger.info(f"Starting parsing of {len(document_ids)} documents")
+
+        for i, doc_id in enumerate(document_ids, 1):
+            try:
+                self.logger.debug(f"Parsing document {i}/{len(document_ids)}: {doc_id}")
+
+                # Check if document is already parsed
+                if self.document_parser.is_document_parsed(doc_id):
+                    self.logger.debug(f"Document {doc_id} already parsed, skipping")
+                    parsing_results['successful'] += 1
+                    continue
+
+                # Parse the document
+                parse_result = self.document_parser.parse_document(doc_id)
+
+                if parse_result and parse_result.get('success', False):
+                    parsing_results['successful'] += 1
+                    self.logger.debug(f"Successfully parsed document {doc_id}")
+                else:
+                    parsing_results['failed'] += 1
+                    error_msg = parse_result.get('error',
+                                                 'Unknown parsing error') if parse_result else 'Parse returned None'
+                    parsing_results['errors'].append(f"Doc {doc_id}: {error_msg}")
+                    self.logger.warning(f"Failed to parse document {doc_id}: {error_msg}")
+
+            except Exception as e:
+                parsing_results['failed'] += 1
+                error_msg = f"Exception parsing document {doc_id}: {str(e)}"
+                parsing_results['errors'].append(error_msg)
+                self.logger.error(error_msg)
+
+            # Progress logging
+            if i % 10 == 0:
+                self.logger.info(f"Parsing progress: {i}/{len(document_ids)} documents processed")
+
+        success_rate = (parsing_results['successful'] / len(document_ids)) * 100 if document_ids else 0
+        self.logger.info(f"Parsing completed: {parsing_results['successful']}/{len(document_ids)} "
+                         f"successful ({success_rate:.1f}%)")
+
+        return parsing_results
 
     def _limit_documents(self,
                          incremental_results: Dict[int, List[DocumentBatch]],
@@ -328,6 +447,15 @@ class ETLOrchestrator:
         """Save job metrics to BigQuery."""
         try:
             metrics_data = metrics.to_dict()
+
+            # Add parsing metrics if they exist
+            if hasattr(metrics, 'total_documents_parsed'):
+                metrics_data['total_documents_parsed'] = metrics.total_documents_parsed
+                metrics_data['total_parsing_failures'] = metrics.total_parsing_failures
+            else:
+                metrics_data['total_documents_parsed'] = 0
+                metrics_data['total_parsing_failures'] = 0
+
             if 'processing_details' in metrics_data and not isinstance(metrics_data['processing_details'], str):
                 processing_details = metrics_data['processing_details']
                 metrics_data['processing_details'] = json.dumps(processing_details)
@@ -390,6 +518,8 @@ class ETLOrchestrator:
                     "total_documents_found": row.total_documents_found,
                     "total_documents_added": row.total_documents_added,
                     "total_documents_skipped": row.total_documents_skipped,
+                    "total_documents_parsed": getattr(row, 'total_documents_parsed', 0),
+                    "total_parsing_failures": getattr(row, 'total_parsing_failures', 0),
                     "errors": list(row.errors) if row.errors else [],
                     "duration_seconds": row.duration_seconds
                 }
@@ -422,6 +552,8 @@ class ETLOrchestrator:
                 status,
                 total_documents_found,
                 total_documents_added,
+                total_documents_parsed,
+                total_parsing_failures,
                 duration_seconds
             FROM `{self.project_id}.{self.dataset_id}.etl_job_metrics`
             ORDER BY start_time DESC
@@ -446,6 +578,8 @@ class ETLOrchestrator:
                     "status": row.status,
                     "total_documents_found": row.total_documents_found,
                     "total_documents_added": row.total_documents_added,
+                    "total_documents_parsed": getattr(row, 'total_documents_parsed', 0),
+                    "total_parsing_failures": getattr(row, 'total_parsing_failures', 0),
                     "duration_seconds": row.duration_seconds
                 })
 
