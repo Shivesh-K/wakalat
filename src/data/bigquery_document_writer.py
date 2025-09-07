@@ -23,6 +23,7 @@ class BigQueryDocumentWriter:
         self.dataset_id = dataset_id
         self.table_id = table_id
         self.details_table_id = f"{table_id}_details"  # Separate table for document details
+        self.parsed_table_id = f"{table_id}_parsed" # Separate table for parsed details
 
         # Initialize BigQuery client
         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
@@ -55,8 +56,34 @@ class BigQueryDocumentWriter:
                 bigquery.SchemaField("created_at", "TIMESTAMP", mode="REQUIRED"),
             ]
 
+            # Schema for parsed document info
+            parsed_schema = [
+                bigquery.SchemaField("doc_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("parsed_at", "TIMESTAMP", mode="REQUIRED"),
+                bigquery.SchemaField("success", "BOOLEAN", mode="REQUIRED"),
+                bigquery.SchemaField("summary", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("key_arguments", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("legal_citations", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("parties_involved", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("legal_areas", "STRING", mode="REPEATED"),
+                bigquery.SchemaField("judgment_type", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("court_name", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("judge_name", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("decision_date", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("case_number", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("outcome", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("case_details", "JSON", mode="NULLABLE"),
+                bigquery.SchemaField("content_length", "INTEGER", mode="NULLABLE"),
+                bigquery.SchemaField("processing_time_seconds", "FLOAT", mode="NULLABLE"),
+                bigquery.SchemaField("error_message", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("ai_model_used", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("parsing_version", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("prompt_version", "STRING", mode="NULLABLE")
+            ]
+
             self._create_table_if_not_exists(self.table_id, links_schema)
             self._create_table_if_not_exists(self.details_table_id, details_schema)
+            self._create_table_if_not_exists(self.parsed_table_id, parsed_schema)
 
         except Exception as e:
             alert_system_error(
@@ -99,7 +126,13 @@ class BigQueryDocumentWriter:
 
         try:
             # Choose the appropriate table
-            target_table_id = self.table_id if table_type == "links" else self.details_table_id
+            target_table_id = None
+            if table_type == "links":
+                target_table_id = self.table_id
+            elif table_type == "details":
+                target_table_id = self.details_table_id
+            elif table_type == "parses":
+                target_table_id = self.parsed_table_id
             table_ref = self.client.dataset(self.dataset_id).table(target_table_id)
             table = self.client.get_table(table_ref)
 
@@ -183,6 +216,112 @@ class BigQueryDocumentWriter:
                 }
             )
             return False
+
+    def insert_parsed_document_details(self, parsed_details: Dict[str, Any]) -> bool:
+        """
+        Insert parsed document details into the parsed table.
+
+        Args:
+            parsed_details (Dict): Parsed details dictionary
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Prepare row for BigQuery
+            row = {
+                "doc_id": parsed_details["doc_id"],
+                "parsed_at": parsed_details.get("parsed_at").isoformat(sep=' ')
+                             if isinstance(parsed_details.get("parsed_at"), datetime)
+                             else datetime.now().isoformat(sep=' '),
+                "success": parsed_details.get("success", False),
+                "summary": parsed_details.get("summary"),
+                "key_arguments": parsed_details.get("key_arguments", []),
+                "legal_citations": parsed_details.get("legal_citations", []),
+                "parties_involved": parsed_details.get("parties_involved", []),
+                "legal_areas": parsed_details.get("legal_areas", []),
+                "judgment_type": parsed_details.get("judgment_type"),
+                "court_name": parsed_details.get("court_name"),
+                "judge_name": parsed_details.get("judge_name"),
+                "decision_date": parsed_details.get("decision_date"),
+                "case_number": parsed_details.get("case_number"),
+                "outcome": parsed_details.get("outcome"),
+                "case_details": json.dumps(parsed_details.get("case_details", {})),
+                "content_length": parsed_details.get("content_length"),
+                "processing_time_seconds": parsed_details.get("processing_time_seconds"),
+                "error_message": parsed_details.get("error_message"),
+                "ai_model_used": parsed_details.get("ai_model_used"),
+                "parsing_version": parsed_details.get("parsing_version"),
+                "prompt_version": parsed_details.get("prompt_version"),
+            }
+
+            return self.insert_rows([row], table_type="parses")
+
+        except Exception as e:
+            self.logger.error(f"Error preparing parsed document details for BigQuery: {e}")
+            alert_system_error(
+                component="parsed_document_details_preparation",
+                error=e,
+                context={
+                    "doc_id": parsed_details.get("doc_id", "unknown")
+                }
+            )
+            return False
+
+
+    def is_document_parsed(self, doc_id: str) -> bool:
+        """
+        Check if a document has already been parsed.
+
+        Args:
+            doc_id: Document ID to check
+
+        Returns:
+            True if document is already parsed
+        """
+        try:
+            query = f"""
+            SELECT COUNT(*) as count
+            FROM `{self.project_id}.{self.dataset_id}.{self.parsed_table_id}`
+            WHERE doc_id = @doc_id AND success = TRUE
+            """
+
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("doc_id", "STRING", doc_id)
+                ]
+            )
+
+            query_job = self.client.query(query, job_config=job_config)
+            results = list(query_job.result())
+
+            return results[0].count > 0 if results else False
+
+        except Exception as e:
+            self.logger.warning(f"Error checking if document {doc_id} is parsed: {e}")
+            return False
+
+
+    def get_unparsed_documents(self, limit: int) -> List[int]:
+        try:
+            query = f"""
+                        SELECT doc_id
+                        FROM `{self.project_id}.{self.dataset_id}.{self.details_table_id}`
+                        WHERE content IS NOT NULL
+                        AND doc_id NOT IN (
+                            SELECT doc_id
+                            FROM `{self.project_id}.{self.dataset_id}.{self.parsed_table_id}`
+                            WHERE success = TRUE
+                        )
+                        LIMIT {limit}
+                        """
+
+            query_job = self.client.query(query)
+            return [row.doc_id for row in query_job.result()]
+
+        except Exception as e:
+            self.logger.error(f"Error getting unparsed documents: {e}")
+            return []
 
     def check_document_exists(self, doc_id: str, table_type: str = "details") -> bool:
         """

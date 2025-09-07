@@ -5,7 +5,7 @@ This script demonstrates how to use the enhanced document retrieval system
 to fetch document details and store them in BigQuery.
 """
 
-from src.data import ComprehensiveDocRetriever
+from src.data import ComprehensiveDocRetriever, DocumentParser
 import os
 from dotenv import load_dotenv
 
@@ -112,6 +112,33 @@ def example_4_complete_workflow():
             print(f"  ❌ Failed")
 
 
+def example_5_parse_unparsed_documents(limit=10):
+    """Example: Parse documents that haven't been parsed yet."""
+    print("\n=== Example 5: Parse Unparsed Documents ===")
+
+    project_id = os.getenv("GCP.PROJECT_ID")
+    dataset_id = os.getenv("GCP.DATASET_ID")
+    credentials_path = os.getenv("GCP.CREDENTIALS_PATH")
+
+    parser = DocumentParser(
+        project_id=project_id,
+        dataset_id=dataset_id,
+        credentials_path=credentials_path
+    )
+
+    summary = parser.parse_unparsed_documents(limit=limit)
+
+    print("\nParsing Summary:")
+    if "error" in summary:
+        print(f"❌ Error: {summary['error']}")
+    else:
+        print(f"  Total processed: {summary['total_processed']}")
+        print(f"  Successful: {summary['successful']}")
+        print(f"  Failed: {summary['failed']}")
+        if summary['total_processed'] > 0:
+            print(f"  Success rate: {summary['success_rate']}%")
+
+
 def check_environment():
     """Check if required environment variables are set."""
     required_vars = [
@@ -147,9 +174,10 @@ if __name__ == "__main__":
         # Uncomment the examples you want to run:
 
         # example_1_fetch_single_document()
-        example_2_fetch_batch_of_missing_documents()
+        # example_2_fetch_batch_of_missing_documents()
         # example_3_system_status()
         # example_4_complete_workflow()
+        example_5_parse_unparsed_documents()
 
     except KeyboardInterrupt:
         print("\n\n⚠️  Operation cancelled by user")

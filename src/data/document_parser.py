@@ -7,15 +7,14 @@ using BigQuery's ML.GENERATE_TEXT function with AI prompts loaded from external 
 import json
 import time
 import os
-from datetime import datetime,UTC
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from pathlib import Path
 
 from google.cloud import bigquery
-from google.cloud.exceptions import NotFound
 
-from base import WakalatLogger, alert_system_error
+from base import WakalatLogger
+from src.data import BigQueryDocumentWriter
 
 
 @dataclass
@@ -62,8 +61,6 @@ class DocumentParser:
     def __init__(self,
                  project_id: str,
                  dataset_id: str,
-                 source_table_id: str = "document_details",
-                 parsed_table_id: str = "parsed_documents",
                  prompts_config_path: Optional[str] = None,
                  credentials_path: Optional[str] = None):
         """
@@ -72,8 +69,6 @@ class DocumentParser:
         Args:
             project_id: GCP project ID
             dataset_id: BigQuery dataset ID
-            source_table_id: Table containing document details
-            parsed_table_id: Table to store parsed results
             prompts_config_path: Path to prompts configuration file
             credentials_path: Path to service account JSON (optional)
         """
@@ -81,8 +76,14 @@ class DocumentParser:
 
         self.project_id = project_id
         self.dataset_id = dataset_id
-        self.source_table_id = source_table_id
-        self.parsed_table_id = parsed_table_id
+        self.source_table_id = os.getenv("GCP.DETAILS_TABLE_ID")
+        self.parsed_table_id = os.getenv("GCP.PARSED_TABLE_ID")
+        self.bq_writer = BigQueryDocumentWriter(
+            project_id=os.getenv('GCP.PROJECT_ID'),
+            dataset_id=os.getenv('GCP.DATASET_ID'),
+            table_id=os.getenv('GCP.TABLE_ID'),
+            credentials_path=os.getenv('GCP.CREDENTIALS_PATH')
+        )
 
         # Load prompt configuration
         self.prompt_config = self._load_prompt_config(prompts_config_path)
@@ -95,9 +96,6 @@ class DocumentParser:
             )
         else:
             self.client = bigquery.Client(project=project_id)
-
-        # Ensure parsed documents table exists
-        self._ensure_parsed_table_exists()
 
     def _load_prompt_config(self, config_path: Optional[str]) -> PromptConfig:
         """
@@ -206,101 +204,6 @@ class DocumentParser:
             self.prompt_config = old_config
             return False
 
-    def _ensure_parsed_table_exists(self):
-        """Create the parsed documents table if it doesn't exist."""
-        try:
-            table_ref = self.client.dataset(self.dataset_id).table(self.parsed_table_id)
-
-            try:
-                self.client.get_table(table_ref)
-                self.logger.info(f"Parsed documents table {self.parsed_table_id} exists")
-            except NotFound:
-                self.logger.info(f"Creating parsed documents table {self.parsed_table_id}")
-
-                schema = [
-                    bigquery.SchemaField("doc_id", "STRING", mode="REQUIRED"),
-                    bigquery.SchemaField("parsed_at", "TIMESTAMP", mode="REQUIRED"),
-                    bigquery.SchemaField("success", "BOOLEAN", mode="REQUIRED"),
-                    bigquery.SchemaField("summary", "STRING", mode="NULLABLE"),
-                    bigquery.SchemaField("key_arguments", "STRING", mode="REPEATED"),
-                    bigquery.SchemaField("legal_citations", "STRING", mode="REPEATED"),
-                    bigquery.SchemaField("parties_involved", "STRING", mode="REPEATED"),
-                    bigquery.SchemaField("legal_areas", "STRING", mode="REPEATED"),
-                    bigquery.SchemaField("judgment_type", "STRING", mode="NULLABLE"),
-                    bigquery.SchemaField("court_name", "STRING", mode="NULLABLE"),
-                    bigquery.SchemaField("judge_name", "STRING", mode="NULLABLE"),
-                    bigquery.SchemaField("decision_date", "STRING", mode="NULLABLE"),
-                    bigquery.SchemaField("case_number", "STRING", mode="NULLABLE"),
-                    bigquery.SchemaField("outcome", "STRING", mode="NULLABLE"),
-                    bigquery.SchemaField("case_details", "JSON", mode="NULLABLE"),
-                    bigquery.SchemaField("content_length", "INTEGER", mode="NULLABLE"),
-                    bigquery.SchemaField("processing_time_seconds", "FLOAT", mode="NULLABLE"),
-                    bigquery.SchemaField("error_message", "STRING", mode="NULLABLE"),
-                    bigquery.SchemaField("ai_model_used", "STRING", mode="NULLABLE"),
-                    bigquery.SchemaField("parsing_version", "STRING", mode="NULLABLE"),
-                    bigquery.SchemaField("prompt_version", "STRING", mode="NULLABLE")
-                ]
-
-                table = bigquery.Table(table_ref, schema=schema)
-                table.description = "Parsed legal documents with AI-extracted information"
-
-                # Partition by parsed_at for better performance
-                table.time_partitioning = bigquery.TimePartitioning(
-                    type_=bigquery.TimePartitioningType.DAY,
-                    field="parsed_at"
-                )
-
-                # Cluster by doc_id for faster lookups
-                table.clustering_fields = ["doc_id"]
-
-                self.client.create_table(table)
-                self.logger.info(f"Created parsed documents table {self.parsed_table_id}")
-
-        except Exception as e:
-            error_msg = f"Could not ensure parsed table exists: {e}"
-            self.logger.error(error_msg)
-            alert_system_error(
-                component="DocumentParser_table_creation",
-                error=e,
-                context={
-                    "table_id": self.parsed_table_id,
-                    "dataset_id": self.dataset_id
-                }
-            )
-            raise
-
-    def is_document_parsed(self, doc_id: str) -> bool:
-        """
-        Check if a document has already been parsed.
-
-        Args:
-            doc_id: Document ID to check
-
-        Returns:
-            True if document is already parsed
-        """
-        try:
-            query = f"""
-            SELECT COUNT(*) as count
-            FROM `{self.project_id}.{self.dataset_id}.{self.parsed_table_id}`
-            WHERE doc_id = @doc_id AND success = TRUE
-            """
-
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("doc_id", "STRING", doc_id)
-                ]
-            )
-
-            query_job = self.client.query(query, job_config=job_config)
-            results = list(query_job.result())
-
-            return results[0].count > 0 if results else False
-
-        except Exception as e:
-            self.logger.warning(f"Error checking if document {doc_id} is parsed: {e}")
-            return False
-
     def parse_document(self, doc_id: str) -> Optional[Dict[str, Any]]:
         """
         Parse a single document using BigQuery AI to extract key information.
@@ -317,7 +220,7 @@ class DocumentParser:
             self.logger.debug(f"Starting AI parsing for document {doc_id}")
 
             # Check if already parsed
-            if self.is_document_parsed(doc_id):
+            if self.bq_writer.is_document_parsed(doc_id):
                 self.logger.debug(f"Document {doc_id} already parsed successfully")
                 return {"success": True, "message": "Already parsed"}
 
@@ -365,6 +268,63 @@ class DocumentParser:
                 self.logger.error(f"Could not save error result for {doc_id}: {save_error}")
 
             return {"success": False, "error": str(e)}
+
+    def parse_unparsed_documents(self, limit: int = 50) -> Dict[str, Any]:
+        """
+        Parse documents that have not yet been parsed successfully.
+
+        Args:
+            limit: Maximum number of documents to parse
+
+        Returns:
+            Dictionary with parsing results
+        """
+        try:
+            # Find unparsed document IDs
+            docs_to_parse = self.bq_writer.get_unparsed_documents(10)
+            if not docs_to_parse:
+                return {
+                    "message": "No unparsed documents found",
+                    "total_processed": 0,
+                    "successful": 0,
+                    "failed": 0
+                }
+
+            self.logger.info(f"Parsing {len(docs_to_parse)} unparsed documents")
+
+            successful = 0
+            failed = 0
+            results = []
+
+            for doc_id in docs_to_parse:
+                try:
+                    self.logger.debug(f"Parsing unparsed document {doc_id}")
+                    result = self.parse_document(doc_id)
+
+                    if result and result.get("success"):
+                        successful += 1
+                    else:
+                        failed += 1
+
+                    results.append({"doc_id": doc_id, **(result or {})})
+
+                except Exception as e:
+                    self.logger.error(f"Error parsing unparsed doc {doc_id}: {e}")
+                    failed += 1
+                    results.append({"doc_id": doc_id, "success": False, "error": str(e)})
+
+            return {
+                "total_processed": len(docs_to_parse),
+                "successful": successful,
+                "failed": failed,
+                "success_rate": round((successful / len(docs_to_parse)) * 100, 2),
+                "results": results
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error in parse_unparsed_documents: {e}")
+            return {"error": str(e)}
+
 
     def _parse_with_ai(self, doc_id: str) -> Optional[ParsedDocumentResult]:
         """
@@ -594,39 +554,7 @@ class DocumentParser:
         """
         try:
             # Prepare data for BigQuery
-            row_data = {
-                "doc_id": result.doc_id,
-                "parsed_at": datetime.now(UTC).isoformat(),
-                "success": result.success,
-                "summary": result.summary,
-                "key_arguments": result.key_arguments or [],
-                "legal_citations": result.legal_citations or [],
-                "parties_involved": result.parties_involved or [],
-                "legal_areas": result.legal_areas or [],
-                "judgment_type": result.judgment_type,
-                "court_name": result.court_name,
-                "judge_name": result.judge_name,
-                "decision_date": result.decision_date,
-                "case_number": result.case_number,
-                "outcome": result.outcome,
-                "case_details": json.dumps(result.case_details) if result.case_details else None,
-                "content_length": result.content_length,
-                "processing_time_seconds": result.processing_time_seconds,
-                "error_message": result.error_message,
-                "ai_model_used": "text_generation_model",
-                "parsing_version": "1.0",
-                "prompt_version": "configurable_v1"
-            }
-
-            table_ref = self.client.dataset(self.dataset_id).table(self.parsed_table_id)
-            errors = self.client.insert_rows_json(table_ref, [row_data])
-
-            if errors:
-                self.logger.error(f"BigQuery insert errors for {result.doc_id}: {errors}")
-                return False
-
-            return True
-
+            return self.bq_writer.insert_parsed_document_details(result.__dict__)
         except Exception as e:
             self.logger.error(f"Error saving parsed document {result.doc_id}: {e}")
             return False
@@ -641,7 +569,7 @@ class DocumentParser:
         try:
             query = f"""
             WITH parsing_stats AS (
-                SELECT 
+                SELECT
                     COUNT(*) as total_parsed,
                     COUNT(CASE WHEN success THEN 1 END) as successful_parsed,
                     COUNT(CASE WHEN NOT success THEN 1 END) as failed_parsed,
@@ -657,7 +585,7 @@ class DocumentParser:
                 FROM `{self.project_id}.{self.dataset_id}.{self.source_table_id}`
                 WHERE content IS NOT NULL
             )
-            SELECT 
+            SELECT
                 p.*,
                 s.total_documents,
                 ROUND((p.total_parsed / s.total_documents) * 100, 2) as completion_percentage
