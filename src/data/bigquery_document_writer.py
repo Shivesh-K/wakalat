@@ -138,15 +138,16 @@ class BigQueryDocumentWriter:
 
             # Add timestamp to rows if not present
             current_time = datetime.now()
-            for row in rows:
-                if "created_at" not in row:
-                    row["created_at"] = current_time.isoformat(sep=' ')
-                if 'year' in row and isinstance(row['year'], int):
-                    year = row['year']
-                    row['year'] = date(year, 1, 1).isoformat()
-                if 'metadata' in row and not isinstance(row['metadata'], str):
-                    metadata = row['metadata']
-                    row['metadata'] = json.dumps(metadata)
+            if table_type != "parses":
+                for row in rows:
+                    if "created_at" not in row:
+                        row["created_at"] = current_time.isoformat(sep=' ')
+                    if 'year' in row and isinstance(row['year'], int):
+                        year = row['year']
+                        row['year'] = date(year, 1, 1).isoformat()
+                    if 'metadata' in row and not isinstance(row['metadata'], str):
+                        metadata = row['metadata']
+                        row['metadata'] = json.dumps(metadata)
 
             # Insert rows
             errors = self.client.insert_rows_json(table, rows)

@@ -8,7 +8,7 @@ import json
 import time
 import os
 from typing import Dict, Any, Optional, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from google.cloud import bigquery
@@ -22,17 +22,17 @@ class ParsedDocumentResult:
     """Represents the result of document parsing."""
     doc_id: str
     success: bool
-    key_arguments: Optional[List[str]] = None
+    key_arguments: Optional[List[str]] = field(default_factory=list)
     summary: Optional[str] = None
     case_details: Optional[Dict[str, Any]] = None
-    legal_citations: Optional[List[str]] = None
+    legal_citations: Optional[List[str]] = field(default_factory=list)
     judgment_type: Optional[str] = None
-    parties_involved: Optional[List[str]] = None
+    parties_involved: Optional[List[str]] = field(default_factory=list)
     court_name: Optional[str] = None
     judge_name: Optional[str] = None
     decision_date: Optional[str] = None
     case_number: Optional[str] = None
-    legal_areas: Optional[List[str]] = None
+    legal_areas: Optional[List[str]] = field(default_factory=list)
     outcome: Optional[str] = None
     error_message: Optional[str] = None
     processing_time_seconds: Optional[float] = None
@@ -325,7 +325,6 @@ class DocumentParser:
             self.logger.error(f"Error in parse_unparsed_documents: {e}")
             return {"error": str(e)}
 
-
     def _parse_with_ai(self, doc_id: str) -> Optional[ParsedDocumentResult]:
         """
         Use BigQuery AI to parse document content and extract structured information.
@@ -337,7 +336,16 @@ class DocumentParser:
             ParsedDocumentResult with extracted information
         """
         try:
-            # Build dynamic query using configured prompts
+            # First, validate that the model exists
+            if not self._validate_ml_model():
+                self.logger.error(f"ML model not found. Please create the model first.")
+                return ParsedDocumentResult(
+                    doc_id=doc_id,
+                    success=False,
+                    error_message="ML model not found. Please create the text generation model."
+                )
+
+            # Build dynamic query using parameterized approach
             content_length = self.prompt_config.content_max_length
 
             query = f"""
@@ -351,91 +359,96 @@ class DocumentParser:
                 AND content IS NOT NULL
                 AND CHAR_LENGTH(content) > 100
             ),
-            ai_analysis AS (
+            prompts AS (
                 SELECT 
                     doc_id,
                     content_length,
-                    -- Extract summary
-                    ML.GENERATE_TEXT(
-                        MODEL `{self.project_id}.{self.dataset_id}.text_generation_model`,
-                        (
-                            SELECT CONCAT(
-                                '{self.prompt_config.summary} ',
-                                'Legal Document Content: ', 
-                                SUBSTR(content, 1, {content_length})
-                            ) as prompt
-                        ),
-                        STRUCT(
-                            {self.prompt_config.temperature} AS temperature,
-                            {self.prompt_config.max_output_tokens} AS max_output_tokens,
-                            TRUE AS flatten_json_output
-                        )
-                    ).ml_generate_text_result AS summary,
-
-                    -- Extract key arguments
-                    ML.GENERATE_TEXT(
-                        MODEL `{self.project_id}.{self.dataset_id}.text_generation_model`,
-                        (
-                            SELECT CONCAT(
-                                '{self.prompt_config.key_arguments} ',
-                                'Legal Document Content: ', 
-                                SUBSTR(content, 1, {content_length})
-                            ) as prompt
-                        ),
-                        STRUCT(
-                            0.3 AS temperature,
-                            512 AS max_output_tokens
-                        )
-                    ).ml_generate_text_result AS key_arguments_raw,
-
-                    -- Extract structured case details
-                    ML.GENERATE_TEXT(
-                        MODEL `{self.project_id}.{self.dataset_id}.text_generation_model`,
-                        (
-                            SELECT CONCAT(
-                                '{self.prompt_config.case_details} ',
-                                'Legal Document Content: ', 
-                                SUBSTR(content, 1, {content_length})
-                            ) as prompt
-                        ),
-                        STRUCT(
-                            0.1 AS temperature,
-                            512 AS max_output_tokens,
-                            TRUE AS flatten_json_output
-                        )
-                    ).ml_generate_text_result AS case_details_raw,
-
-                    -- Extract legal citations
-                    ML.GENERATE_TEXT(
-                        MODEL `{self.project_id}.{self.dataset_id}.text_generation_model`,
-                        (
-                            SELECT CONCAT(
-                                '{self.prompt_config.legal_citations} ',
-                                'Legal Document Content: ', 
-                                SUBSTR(content, 1, {content_length})
-                            ) as prompt
-                        ),
-                        STRUCT(
-                            0.2 AS temperature,
-                            512 AS max_output_tokens
-                        )
-                    ).ml_generate_text_result AS citations_raw
-
+                    CONCAT(@summary_prompt, 'Legal Document Content: ', SUBSTR(content, 1, {content_length})) AS summary_prompt,
+                    CONCAT(@key_arguments_prompt, 'Legal Document Content: ', SUBSTR(content, 1, {content_length})) AS key_arguments_prompt,
+                    CONCAT(@case_details_prompt, 'Legal Document Content: ', SUBSTR(content, 1, {content_length})) AS case_details_prompt,
+                    CONCAT(@legal_citations_prompt, 'Legal Document Content: ', SUBSTR(content, 1, {content_length})) AS citations_prompt
                 FROM document_content
+            ),
+            ai_summary AS (
+                SELECT 
+                    doc_id,
+                    ml_generate_text_llm_result AS summary
+                FROM ML.GENERATE_TEXT(
+                    MODEL `{self.project_id}.{self.dataset_id}.text_generation_model`,
+                    (SELECT doc_id, summary_prompt AS prompt FROM prompts),
+                    STRUCT(
+                        {self.prompt_config.temperature} AS temperature,
+                        {self.prompt_config.max_output_tokens} AS max_output_tokens,
+                        TRUE AS flatten_json_output
+                    )
+                )
+            ),
+            ai_key_arguments AS (
+                SELECT 
+                    doc_id,
+                    ml_generate_text_llm_result AS key_arguments_raw
+                FROM ML.GENERATE_TEXT(
+                    MODEL `{self.project_id}.{self.dataset_id}.text_generation_model`,
+                    (SELECT doc_id, key_arguments_prompt AS prompt FROM prompts),
+                    STRUCT(
+                        0.3 AS temperature,
+                        512 AS max_output_tokens,
+                        TRUE AS flatten_json_output
+                    )
+                )
+            ),
+            ai_case_details AS (
+                SELECT 
+                    doc_id,
+                    ml_generate_text_llm_result AS case_details_raw
+                FROM ML.GENERATE_TEXT(
+                    MODEL `{self.project_id}.{self.dataset_id}.text_generation_model`,
+                    (SELECT doc_id, case_details_prompt AS prompt FROM prompts),
+                    STRUCT(
+                        0.1 AS temperature,
+                        512 AS max_output_tokens,
+                        TRUE AS flatten_json_output
+                    )
+                )
+            ),
+            ai_citations AS (
+                SELECT 
+                    doc_id,
+                    ml_generate_text_llm_result AS citations_raw
+                FROM ML.GENERATE_TEXT(
+                    MODEL `{self.project_id}.{self.dataset_id}.text_generation_model`,
+                    (SELECT doc_id, citations_prompt AS prompt FROM prompts),
+                    STRUCT(
+                        0.2 AS temperature,
+                        512 AS max_output_tokens,
+                        TRUE AS flatten_json_output
+                    )
+                )
             )
             SELECT 
-                doc_id,
-                content_length,
-                summary,
-                key_arguments_raw,
-                case_details_raw,
-                citations_raw
-            FROM ai_analysis
+                p.doc_id,
+                p.content_length,
+                s.summary,
+                ka.key_arguments_raw,
+                cd.case_details_raw,
+                c.citations_raw
+            FROM prompts p
+            LEFT JOIN ai_summary s ON p.doc_id = s.doc_id
+            LEFT JOIN ai_key_arguments ka ON p.doc_id = ka.doc_id
+            LEFT JOIN ai_case_details cd ON p.doc_id = cd.doc_id
+            LEFT JOIN ai_citations c ON p.doc_id = c.doc_id
             """
 
             job_config = bigquery.QueryJobConfig(
                 query_parameters=[
-                    bigquery.ScalarQueryParameter("doc_id", "STRING", doc_id)
+                    bigquery.ScalarQueryParameter("doc_id", "STRING", doc_id),
+                    bigquery.ScalarQueryParameter("summary_prompt", "STRING", self.prompt_config.summary + " "),
+                    bigquery.ScalarQueryParameter("key_arguments_prompt", "STRING",
+                                                  self.prompt_config.key_arguments + " "),
+                    bigquery.ScalarQueryParameter("case_details_prompt", "STRING",
+                                                  self.prompt_config.case_details + " "),
+                    bigquery.ScalarQueryParameter("legal_citations_prompt", "STRING",
+                                                  self.prompt_config.legal_citations + " ")
                 ]
             )
 
@@ -468,6 +481,12 @@ class DocumentParser:
                     case_details = json.loads(row.case_details_raw)
                     result.case_details = case_details
 
+                    for key in ['parties_involved', 'legal_areas', 'legal_citations', 'key_arguments']:
+                        if key in case_details and case_details[key] is None:
+                            case_details.pop(key)
+
+                    print(case_details)
+
                     # Extract individual fields from JSON
                     result.court_name = case_details.get('court_name')
                     result.judge_name = case_details.get('judge_name')
@@ -477,6 +496,8 @@ class DocumentParser:
                     result.outcome = case_details.get('outcome')
                     result.parties_involved = case_details.get('parties_involved', [])
                     result.legal_areas = case_details.get('legal_areas', [])
+                    result.legal_citations = case_details.get('legal_citations', [])
+                    result.key_arguments = case_details.get('key_arguments', [])
 
                 except json.JSONDecodeError:
                     # If JSON parsing fails, try to extract manually
@@ -487,6 +508,8 @@ class DocumentParser:
             if row.citations_raw:
                 result.legal_citations = self._extract_list_from_text(row.citations_raw)
 
+            self.logger.info(result)
+
             return result
 
         except Exception as e:
@@ -496,6 +519,21 @@ class DocumentParser:
                 success=False,
                 error_message=str(e)
             )
+
+    def _validate_ml_model(self) -> bool:
+        """
+        Check if the ML model exists in BigQuery.
+
+        Returns:
+            True if model exists, False otherwise
+        """
+        try:
+            model_ref = f"{self.project_id}.{self.dataset_id}.text_generation_model"
+            self.client.get_model(model_ref)
+            return True
+        except Exception as e:
+            self.logger.warning(f"ML model validation failed: {e}")
+            return False
 
     def _clean_text(self, text: str) -> str:
         """Clean and normalize extracted text."""
