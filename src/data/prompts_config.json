@@ -1,0 +1,95 @@
+{
+  "summary": {
+    "prompt": "Please provide a concise summary (2-3 paragraphs) of this legal judgment. Focus on the key issues, main arguments, and the court's decision. Include the legal context and significance of the ruling.",
+    "temperature": 0.2,
+    "max_output_tokens": 1024
+  },
+  "key_arguments": {
+    "prompt": "Extract the main legal arguments from this judgment. List them as numbered points (1., 2., 3., etc.). Focus on the core legal reasoning and key points made by the court. Include both plaintiff and defendant arguments where applicable.",
+    "temperature": 0.3,
+    "max_output_tokens": 512
+  },
+  "case_details": {
+    "prompt": "Extract structured information from this legal document in JSON format. Include: court_name, judge_name, case_number, decision_date (YYYY-MM-DD format), parties_involved (as array with plaintiff and defendant), judgment_type (civil/criminal/constitutional etc.), outcome (allowed/dismissed/partially allowed etc.), legal_areas (as array of legal domains like contract law, tort law, etc.). Only include information explicitly mentioned in the document. Use null for missing information.",
+    "temperature": 0.1,
+    "max_output_tokens": 512
+  },
+  "legal_citations": {
+    "prompt": "Extract all legal case citations mentioned in this document. List each citation on a separate line. Include case names, court citations, statutory references, and constitutional provisions. Format as: Case Name v. Case Name, Citation, Year.",
+    "temperature": 0.2,
+    "max_output_tokens": 512
+  },
+  "global_settings": {
+    "content_max_length": 8000,
+    "flatten_json_output": true,
+    "temperature": 0.2,
+    "max_output_tokens": 1024
+  },
+  "version": "1.0",
+  "description": "Default prompts for legal document parsing using BigQuery AI",
+  "last_updated": "2024-01-15",
+  "custom_prompts": {
+    "contract_specific": {
+      "summary": {
+        "prompt": "Analyze this contract-related legal judgment. Summarize the contractual dispute, key contract terms in question, and the court's interpretation of those terms.",
+        "temperature": 0.15
+      },
+      "key_arguments": {
+        "prompt": "Extract contract law arguments from this judgment. Focus on: 1) Formation issues, 2) Performance obligations, 3) Breach allegations, 4) Remedies sought, 5) Court's legal reasoning on contract interpretation."
+      }
+    },
+    "criminal_specific": {
+      "summary": {
+        "prompt": "Summarize this criminal law judgment. Include the charges, key evidence presented, legal defenses raised, and the court's verdict with reasoning.",
+        "temperature": 0.1
+      },
+      "case_details": {
+        "prompt": "Extract criminal case details in JSON format. Include: court_name, judge_name, case_number, decision_date, accused_name, charges (as array), verdict, sentence, appeal_status. Focus on criminal law specific information."
+      }
+    },
+    "constitutional_specific": {
+      "summary": {
+        "prompt": "Analyze this constitutional law judgment. Summarize the constitutional questions raised, fundamental rights involved, constitutional provisions cited, and the court's constitutional interpretation.",
+        "temperature": 0.1
+      },
+      "legal_citations": {
+        "prompt": "Extract constitutional and precedent citations. Focus on: 1) Constitutional articles and provisions, 2) Supreme Court precedents, 3) High Court constitutional bench decisions, 4) International human rights references."
+      }
+    }
+  },
+  "prompt_templates": {
+    "enhanced_summary": "Provide a comprehensive summary of this {document_type} judgment in {paragraph_count} paragraphs. Focus on: {focus_areas}. Include legal context and significance.",
+    "structured_arguments": "Extract {argument_type} arguments from this judgment. Present as {format}. Include: {required_elements}.",
+    "detailed_citations": "Extract all {citation_types} mentioned in this document. Format according to {citation_style}. Include: {citation_elements}."
+  },
+  "validation_rules": {
+    "min_summary_length": 100,
+    "max_summary_length": 2000,
+    "min_arguments_count": 1,
+    "max_arguments_count": 20,
+    "required_case_detail_fields": ["court_name", "case_number", "decision_date"],
+    "date_format": "YYYY-MM-DD",
+    "citation_format_regex": ".*v\\..*,\\s*\\d{4}.*"
+  },
+  "error_handling": {
+    "retry_on_empty_response": true,
+    "max_retries": 3,
+    "fallback_prompts": {
+      "summary": "Summarize this legal document briefly.",
+      "key_arguments": "List the main points from this legal document.",
+      "case_details": "Extract basic case information as JSON.",
+      "legal_citations": "List any case citations found."
+    }
+  },
+  "performance_settings": {
+    "batch_processing": {
+      "batch_size": 10,
+      "parallel_requests": 5,
+      "delay_between_batches": 2
+    },
+    "caching": {
+      "enable_prompt_caching": true,
+      "cache_duration_hours": 24
+    }
+  }
+}
