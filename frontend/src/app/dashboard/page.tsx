@@ -17,7 +17,7 @@ export default function DashboardPage() {
             <p className="mt-2 text-gray-600">Welcome back, Sarah. Here's what's happening with your cases.</p>
           </div>
           <Button className="bg-orange-500 hover:bg-orange-600" asChild>
-            <Link href="/upload-evidence">
+            <Link href="/new-case">
               <Plus className="h-4 w-4 mr-2" />
               New Case
             </Link>
